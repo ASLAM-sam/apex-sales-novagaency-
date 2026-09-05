@@ -154,9 +154,13 @@ export const api = {
     );
   },
 
+  listLeadOutreach(leadId: string): Promise<Outreach[]> {
+    return apiClient.get<{ data: Outreach[] }>(`/api/v1/leads/${leadId}/outreach`).then((envelope) => envelope.data);
+  },
+
   updateOutreachDraft(
     outreachId: string,
-    updates: { subject?: string; body?: string },
+    updates: { subject?: string; message?: string; status?: string },
   ): Promise<Outreach> {
     return apiClient.patch<{ data: Outreach }>(`/api/v1/outreach/${outreachId}`, updates).then((envelope) => envelope.data);
   },

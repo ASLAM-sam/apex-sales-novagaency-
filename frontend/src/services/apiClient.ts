@@ -21,11 +21,43 @@ function friendlyHttpMessage(status: number, statusText: string): string {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function extractErrorMessage(status: number, statusText: string, data: unknown): string {
+  const fallback = friendlyHttpMessage(status, statusText);
+  if (!isRecord(data)) return fallback;
+
+  const error = data.error;
+  if (isRecord(error) && typeof error.message === "string" && error.message.trim()) {
+    return error.message;
+  }
+  if (typeof data.detail === "string" && data.detail.trim()) {
+    return data.detail;
+  }
+  if (Array.isArray(data.detail)) {
+    const details = data.detail
+      .map((item) => {
+        if (!isRecord(item)) return null;
+        const loc = Array.isArray(item.loc) ? item.loc.join(".") : "field";
+        const msg = typeof item.msg === "string" ? item.msg : null;
+        return msg ? `${loc}: ${msg}` : null;
+      })
+      .filter((item): item is string => Boolean(item));
+    if (details.length) return details.join("; ");
+  }
+  if (typeof data.message === "string" && data.message.trim()) {
+    return data.message;
+  }
+  return fallback;
+}
+
 export class ApiError extends Error {
   status: number;
   data: unknown;
 
-  constructor(message: string, status: number, data?: any) {
+  constructor(message: string, status: number, data?: unknown) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -47,44 +79,28 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       headers,
     });
 
-    let data: any = null;
-    const contentType = response.headers.get("content-type");
-    if (contentType && contentType.includes("application/json")) {
-      data = await response.json();
+    let data: unknown = null;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      const text = await response.text();
+      data = text ? JSON.parse(text) : null;
     }
 
     if (!response.ok) {
-      let errorMessage = friendlyHttpMessage(response.status, response.statusText);
-
-      if (data && typeof data === "object") {
-        if (data.error && typeof data.error === "object") {
-          if (typeof data.error.message === "string" && data.error.message.trim()) {
-            errorMessage = data.error.message;
-          }
-        } else if (typeof data.detail === "string") {
-          errorMessage = data.detail;
-        } else if (Array.isArray(data.detail)) {
-          errorMessage = data.detail
-            .map((err: { loc?: string[]; msg?: string }) => `${err.loc?.join(".") || "field"}: ${err.msg}`)
-            .join("; ");
-        } else if (typeof data.message === "string") {
-          errorMessage = data.message;
-        }
-      }
-
-      throw new ApiError(errorMessage, response.status, data);
+      throw new ApiError(extractErrorMessage(response.status, response.statusText, data), response.status, data);
     }
 
     return data as T;
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (err instanceof ApiError) {
       throw err;
     }
+    const message = err instanceof Error ? err.message : "";
     throw new ApiError(
-      err.message === "Failed to fetch"
+      message === "Failed to fetch" || message === "NetworkError when attempting to fetch resource."
         ? "Unable to connect to Apex Sales AI API. Please ensure the backend is running."
-        : err.message || "An unexpected network error occurred.",
-      0
+        : message || "An unexpected network error occurred.",
+      0,
     );
   }
 }
@@ -94,17 +110,17 @@ export const apiClient = {
     return request<T>(endpoint, { method: "GET" });
   },
 
-  post<T>(endpoint: string, body?: any): Promise<T> {
+  post<T>(endpoint: string, body?: unknown): Promise<T> {
     return request<T>(endpoint, {
       method: "POST",
-      body: body ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   },
 
-  patch<T>(endpoint: string, body?: any): Promise<T> {
+  patch<T>(endpoint: string, body?: unknown): Promise<T> {
     return request<T>(endpoint, {
       method: "PATCH",
-      body: body ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   },
 };

@@ -26,7 +26,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Funnel, FunnelChart, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { useDashboard } from "./hooks/useDashboard";
 import { useLeadActions, useLeadDetail, useLeadTimeline } from "./hooks/useLeadDetail";
@@ -34,7 +34,7 @@ import { useSalesLeads } from "./hooks/useSalesLeads";
 import { cn } from "./lib/utils";
 import { api } from "./services/api";
 import type { ContactState, Lead, NavItem, Page, ToastMessage } from "./types";
-import type { ReadinessFlags, SalesLeadDetailResponse } from "./types/api";
+import type { Outreach, ReadinessFlags, SalesLeadDetailResponse } from "./types/api";
 import { formatDate, salesLeadSummaryToLeadItem } from "./utils/adapters";
 
 const navPrimary: NavItem[] = [
@@ -143,8 +143,9 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [globalQuery, setGlobalQuery] = useState("");
   const [pitchText, setPitchText] = useState("");
-  const { leads, loading: leadsLoading, error: leadsError, refetch: refetchLeads } = useSalesLeads({ page: 1, page_size: 100, sort_by: "created_at" });
-  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? leads[0] ?? null;
+  const { leads, loading: leadsLoading, error: leadsError, refetch: refetchLeads, pagination, setParams } = useSalesLeads({ page: 1, page_size: 25, sort_by: "created_at" });
+  const { leads: hotLeads, loading: hotLoading, error: hotError, refetch: refetchHot } = useSalesLeads({ page: 1, page_size: 25, min_score: 80, sort_by: "score" });
+  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? null;
 
   function toast(title: string, tone: ToastMessage["tone"] = "success") {
     const id = Date.now() + Math.random();
@@ -153,6 +154,7 @@ export default function App() {
   }
 
   function go(next: Page, leadId?: string) {
+    if (leadId && leadId !== selectedLeadId) setPitchText("");
     if (leadId) setSelectedLeadId(leadId);
     setPage(next);
     setPaletteOpen(false);
@@ -160,10 +162,14 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  async function refreshWorkspace() {
+    await Promise.all([refetchLeads(), refetchHot()]);
+  }
+
   async function moveLead(id: string, status: ContactState) {
     try {
       await api.updateLeadStatus(id, contactStateToLeadStatus(status));
-      await refetchLeads();
+      await refreshWorkspace();
       toast(`Lead moved to ${status}`);
     } catch (err) {
       toast(err instanceof Error ? err.message : "Unable to update lead status", "error");
@@ -184,10 +190,10 @@ export default function App() {
   const pageContent: Record<Page, React.ReactNode> = {
     command: <CommandCenter go={go} toast={toast} />,
     find: <FindLeads go={go} toast={toast} setSelectedLeadId={setSelectedLeadId} />,
-    hot: <HotLeads leads={leads.filter((lead) => lead.quality === "Hot")} go={go} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
-    leads: <AllLeads leads={leads} go={go} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
-    leadDetail: <LeadDetail leadId={selectedLeadId ?? selectedLead?.id ?? null} fallback={selectedLead} go={go} toast={toast} moveLead={moveLead} onChanged={refetchLeads} />,
-    pitch: <PitchGenerator leadId={selectedLeadId ?? selectedLead?.id ?? null} fallback={selectedLead} pitchText={pitchText} setPitchText={setPitchText} toast={toast} onChanged={refetchLeads} />,
+    hot: <HotLeads leads={hotLeads} go={go} toast={toast} loading={hotLoading} error={hotError} onRetry={refetchHot} />,
+    leads: <AllLeads leads={leads} go={go} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} pagination={pagination} onPageChange={(page) => setParams({ page })} />,
+    leadDetail: <LeadDetail leadId={selectedLeadId} fallback={selectedLead} go={go} toast={toast} moveLead={moveLead} onChanged={refreshWorkspace} />,
+    pitch: <PitchGenerator leadId={selectedLeadId} fallback={selectedLead} pitchText={pitchText} setPitchText={setPitchText} toast={toast} onChanged={refreshWorkspace} />,
     conversations: <ConversationsPage leads={leads} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
     outreach: <OutreachPage leads={leads} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
     pipeline: <PipelinePage leads={leads} go={go} moveLead={moveLead} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
@@ -370,8 +376,8 @@ function OpportunityBadge({ label }: { label: string }) {
   return <span className="inline-flex rounded-md border border-cyan-300/20 bg-cyan-400/8 px-2 py-1 text-xs font-medium text-cyan-100">{label}</span>;
 }
 
-function StatusBanner({ loading, error, empty, emptyText, onRetry }: { loading?: boolean; error?: string | null; empty?: boolean; emptyText?: string; onRetry?: () => void }) {
-  if (loading) return <Panel className="p-5 text-sm text-slate-400">Loading workspace data...</Panel>;
+function StatusBanner({ loading, error, empty, emptyText, loadingText, onRetry }: { loading?: boolean; error?: string | null; empty?: boolean; emptyText?: string; loadingText?: string; onRetry?: () => void }) {
+  if (loading) return <Panel className="p-5 text-sm text-slate-400">{loadingText ?? "Loading workspace data..."}</Panel>;
   if (error) return <Panel className="p-5 text-sm text-red-200">{error}{onRetry && <Button className="ml-3" variant="secondary" onClick={onRetry}>Retry</Button>}</Panel>;
   if (empty) return <Panel className="p-5 text-sm text-slate-400">{emptyText ?? "No records yet."}</Panel>;
   return null;
@@ -480,6 +486,7 @@ function ActivityTimeline({ leads }: { leads: Lead[] }) {
     <Panel className="p-5">
       <SectionTitle icon={<Gauge size={18} />} title="Today's Activity" />
       <div className="mt-4 space-y-4">
+        {!leads.length && <p className="text-sm text-slate-400">No recent lead activity yet.</p>}
         {leads.map((lead) => (
           <div key={lead.id} className="grid grid-cols-[3.2rem_1fr] gap-3 text-sm">
             <span className="text-slate-500">{lead.foundAt}</span>
@@ -686,29 +693,67 @@ function LeadDetail({ leadId, fallback, go, toast, moveLead, onChanged }: { lead
 
   useEffect(() => {
     if (leadId) void actions.prepare();
-  }, [leadId]);
+  }, [leadId, actions.prepare]);
+
+  async function afterAction() {
+    await refetch();
+    await refetchTimeline();
+    await onChanged();
+  }
 
   async function runRecommended() {
     if (!leadId || busy) return;
     try {
       if (nextAction === "RUN_INTELLIGENCE") {
         const result = await actions.runIntelligence();
-        if (!result) throw new Error(actions.error ?? "Intelligence failed");
+        if (!result) {
+          if (actions.error) throw new Error(actions.error);
+          return;
+        }
         toast(result.message);
       } else if (nextAction === "QUALIFY") {
         const result = await actions.qualify();
-        if (!result) throw new Error(actions.error ?? "Qualification failed");
+        if (!result) {
+          if (actions.error) throw new Error(actions.error);
+          return;
+        }
         toast(result.message);
       } else if (nextAction === "GENERATE_PITCH") {
+        const result = await actions.generatePitch();
+        if (!result) {
+          if (actions.error) throw new Error(actions.error);
+          return;
+        }
+        toast(result.message);
+        await afterAction();
         go("pitch", leadId);
         return;
       } else {
-        toast("Review the current draft before sending.");
+        toast("Review the current draft before sending. Outreach is not sent automatically.");
+        go("pitch", leadId);
         return;
       }
-      await refetch();
-      await refetchTimeline();
-      await onChanged();
+      await afterAction();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Action failed", "error");
+    }
+  }
+
+  async function runNamedAction(kind: "RUN_INTELLIGENCE" | "QUALIFY" | "GENERATE_PITCH") {
+    if (!leadId || busy) return;
+    try {
+      const result = kind === "RUN_INTELLIGENCE"
+        ? await actions.runIntelligence()
+        : kind === "QUALIFY"
+          ? await actions.qualify()
+          : await actions.generatePitch();
+      if (!result) {
+        if (actions.error) throw new Error(actions.error);
+        return;
+      }
+      toast(result.message);
+      await afterAction();
+      if (kind === "GENERATE_PITCH") go("pitch", leadId);
     } catch (err) {
       toast(err instanceof Error ? err.message : "Action failed", "error");
     }
@@ -722,6 +767,8 @@ function LeadDetail({ leadId, fallback, go, toast, moveLead, onChanged }: { lead
     <>
       <PageHeader title={display.name} subtitle={`${display.industry} · ${display.location}`} action={<div className="flex gap-2"><LeadScore score={display.score} /><Button onClick={() => go("pitch", display.id)} disabled={busy}><Sparkles size={16} /> Generate Pitch</Button></div>} />
       {(error || actions.error) && <div className="mb-4"><StatusBanner error={error ?? actions.error} onRetry={refetch} /></div>}
+      {actions.preparing && !busy && <div className="mb-4"><StatusBanner loading loadingText="Preparing lead actions..." /></div>}
+      {actions.lastMessage && !actions.error && <p className="mb-4 text-sm text-emerald-200">{actions.lastMessage}</p>}
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="space-y-6">
           <Panel className="p-5"><SectionTitle icon={<BriefcaseBusiness size={18} />} title="Business Overview" /><p className="mt-4 text-slate-300">{display.overview}</p></Panel>
@@ -761,6 +808,8 @@ function LeadDetail({ leadId, fallback, go, toast, moveLead, onChanged }: { lead
             {flags && <p className="mt-3 text-xs text-slate-400">Ready: research {flags.can_research ? "yes" : "no"} · qualify {flags.can_qualify ? "yes" : "no"} · pitch {flags.can_generate_pitch ? "yes" : "no"} · draft {flags.has_draft ? "yes" : "no"}</p>}
             <div className="mt-5 flex flex-wrap gap-2">
               <Button onClick={() => void runRecommended()} disabled={busy}>{busy ? "Working..." : nextAction === "GENERATE_PITCH" ? "Generate Pitch" : nextAction === "QUALIFY" ? "Qualify Lead" : nextAction === "RUN_INTELLIGENCE" ? "Run Intelligence" : "Review Draft"}</Button>
+              <Button variant="secondary" onClick={() => void runNamedAction("RUN_INTELLIGENCE")} disabled={busy}>Run Intelligence</Button>
+              <Button variant="secondary" onClick={() => void runNamedAction("QUALIFY")} disabled={busy}>Qualify</Button>
               <Button variant="secondary" onClick={() => go("pitch", display.id)} disabled={busy}><Sparkles size={16} /> Open Pitch</Button>
               <Button variant="ghost" onClick={() => moveLead(display.id, "Contacted")} disabled={busy}>Move to Contacted</Button>
             </div>
@@ -784,33 +833,25 @@ function PitchGenerator({ leadId, fallback, pitchText, setPitchText, toast, onCh
   const actions = useLeadActions(leadId);
   const [type, setType] = useState("WhatsApp");
   const [tone, setTone] = useState("Professional");
-  const attempted = useRef(false);
   const display = lead ?? fallback;
   const generating = actions.loading;
-  const draftText = pitchText || extractPitchText(rawDetail);
+  const existingDraft = extractPitchText(rawDetail);
+  const draftText = pitchText || existingDraft;
+  const pitchStatus = rawDetail?.contact_action_data.pitch_status ?? rawDetail?.latest_outreach?.status ?? null;
 
   async function createPitch(regenerate = false) {
     if (!leadId || generating) return;
-    const result = await actions.generatePitch(pitchChannelFromType(type), regenerate);
-    if (!result) {
-      toast(actions.error ?? "Pitch generation failed", "error");
-      return;
+    try {
+      const result = await actions.generatePitch(pitchChannelFromType(type), regenerate);
+      if (!result) return;
+      setPitchText(extractPitchText(null, result.result) || result.message);
+      await refetch();
+      await onChanged();
+      toast(regenerate ? "Pitch draft regenerated" : "Pitch draft generated");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Pitch generation failed", "error");
     }
-    setPitchText(extractPitchText(null, result.result) || result.message);
-    await refetch();
-    await onChanged();
-    toast(regenerate ? "Pitch draft regenerated" : "Pitch draft generated");
   }
-
-  useEffect(() => {
-    attempted.current = false;
-  }, [leadId]);
-
-  useEffect(() => {
-    if (!leadId || attempted.current || generating || draftText) return;
-    attempted.current = true;
-    void createPitch();
-  }, [leadId, draftText, generating]);
 
   if (loading && !display) return <StatusBanner loading />;
   if (error && !display) return <StatusBanner error={error} onRetry={refetch} />;
@@ -820,12 +861,13 @@ function PitchGenerator({ leadId, fallback, pitchText, setPitchText, toast, onCh
     <>
       <PageHeader title="AI Pitch Generator" subtitle={`${display.name} · ${display.score}/100`} />
       {actions.error && <div className="mb-4"><StatusBanner error={actions.error} /></div>}
+      {pitchStatus && <p className="mb-4 text-sm text-slate-400">Draft status: {pitchStatus}. Sending remains disabled until you approve a message locally.</p>}
       <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
         <Panel className="p-5">
           <div className="flex flex-wrap gap-2">{["WhatsApp", "Email", "Instagram DM", "Call Opener", "Follow-up"].map((item) => <button key={item} onClick={() => setType(item)} className={cn("rounded-md border px-3 py-2 text-sm", type === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
           <div className="mt-5 flex flex-wrap gap-2">{["Professional", "Friendly", "Direct", "Consultative", "Short"].map((item) => <button key={item} onClick={() => setTone(item)} className={cn("rounded-md border px-3 py-2 text-sm", tone === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
-          <textarea value={generating ? "Generating personalized pitch..." : draftText} onChange={(event) => setPitchText(event.target.value)} className="focus-ring mt-5 min-h-[360px] w-full resize-y rounded-lg border border-white/10 bg-black/24 p-4 text-sm leading-7 text-slate-100 focus:border-cyan-300/45" />
-          <div className="mt-4 flex flex-wrap gap-2"><Button onClick={() => void createPitch()} disabled={generating}><Sparkles size={16} /> Generate Pitch</Button><Button variant="secondary" onClick={() => void createPitch(true)} disabled={generating}>Regenerate</Button><Button variant="secondary" onClick={() => { void copyText(draftText); toast("Message copied"); }}><Copy size={16} /> Copy</Button><Button variant="ghost" onClick={() => { const digits = digitsPhone(display.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}><Send size={16} /> WhatsApp</Button></div>
+          <textarea value={generating ? "Generating personalized pitch..." : draftText} onChange={(event) => setPitchText(event.target.value)} placeholder="No pitch draft yet. Generate one to review it here." className="focus-ring mt-5 min-h-[360px] w-full resize-y rounded-lg border border-white/10 bg-black/24 p-4 text-sm leading-7 text-slate-100 focus:border-cyan-300/45" />
+          <div className="mt-4 flex flex-wrap gap-2"><Button onClick={() => void createPitch()} disabled={generating}><Sparkles size={16} /> {generating ? "Working..." : "Generate Pitch"}</Button><Button variant="secondary" onClick={() => void createPitch(true)} disabled={generating}>Regenerate</Button><Button variant="secondary" onClick={() => { void copyText(draftText); toast(draftText ? "Message copied" : "No draft to copy"); }}><Copy size={16} /> Copy</Button><Button variant="ghost" onClick={() => { const digits = digitsPhone(display.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}><Send size={16} /> WhatsApp</Button></div>
         </Panel>
         <Panel className="p-5"><SectionTitle icon={<Sparkles size={18} />} title="AI Quality" /><div className="mt-5 space-y-4"><Quality label="Personalization" value={display.score || 70} /><Quality label="Relevance" value={Math.min(100, (display.score || 70) + 6)} /><Quality label="Clarity" value={Math.min(100, (display.score || 70) + 4)} /><Quality label="Sales Pressure" value={20} low /></div><div className="mt-6 space-y-2 text-sm text-slate-300">{["Mentions business", "Uses real opportunity", "Personalized", "Clear CTA", "Not overly salesy"].map((item) => <p key={item} className="flex gap-2"><Check size={15} className="text-emerald-300" /> {item}</p>)}</div></Panel>
       </div>
@@ -841,11 +883,11 @@ function HotLeads({ leads, go, toast, loading, error, onRetry }: { leads: Lead[]
   return <LeadTable title="Hot Leads" subtitle="Businesses most likely to benefit from your services." leads={leads} go={go} toast={toast} filters={["All", "No Website", "Website Redesign", "High Value", "Recently Found"]} loading={loading} error={error} onRetry={onRetry} />;
 }
 
-function AllLeads({ leads, go, toast, loading, error, onRetry }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
-  return <LeadTable title="All Leads" subtitle="Every researched prospect in your sales workspace." leads={leads} go={go} toast={toast} filters={["All", "Hot", "Good", "Maybe"]} loading={loading} error={error} onRetry={onRetry} />;
+function AllLeads({ leads, go, toast, loading, error, onRetry, pagination, onPageChange }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void; pagination?: { page: number; pageSize: number; total: number; pages: number } | null; onPageChange?: (page: number) => void }) {
+  return <LeadTable title="All Leads" subtitle="Every researched prospect in your sales workspace." leads={leads} go={go} toast={toast} filters={["All", "Hot", "Good", "Maybe"]} loading={loading} error={error} onRetry={onRetry} pagination={pagination} onPageChange={onPageChange} />;
 }
 
-function LeadTable({ title, subtitle, leads, go, toast, filters, loading, error, onRetry }: { title: string; subtitle: string; leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; filters: string[]; loading?: boolean; error?: string | null; onRetry?: () => void }) {
+function LeadTable({ title, subtitle, leads, go, toast, filters, loading, error, onRetry, pagination, onPageChange }: { title: string; subtitle: string; leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; filters: string[]; loading?: boolean; error?: string | null; onRetry?: () => void; pagination?: { page: number; pageSize: number; total: number; pages: number } | null; onPageChange?: (page: number) => void }) {
   const [filter, setFilter] = useState("All");
   const filtered = leads.filter((lead) => filter === "All" || lead.quality === filter || lead.websiteState.toLowerCase().includes(filter.toLowerCase().replace("website redesign", "outdated")));
   return (
@@ -855,6 +897,15 @@ function LeadTable({ title, subtitle, leads, go, toast, filters, loading, error,
       <Panel className="p-5">
         <div className="mb-4 flex flex-wrap gap-2">{filters.map((item) => <button key={item} onClick={() => setFilter(item)} className={cn("rounded-md border px-3 py-2 text-sm", filter === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
         <div className="overflow-auto"><table className="w-full min-w-[880px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Business</th><th>Industry</th><th>Location</th><th>Score</th><th>Opportunity</th><th>Contact</th><th>Last Action</th><th>Next Action</th></tr></thead><tbody>{filtered.map((lead) => <tr key={lead.id} className="border-t border-white/10 text-slate-300 hover:bg-white/[0.025]"><td className="py-4"><button onClick={() => go("leadDetail", lead.id)} className="font-semibold text-white hover:text-cyan-200">{lead.name}</button></td><td>{lead.industry}</td><td>{lead.location}</td><td><LeadScore score={lead.score} /></td><td>{lead.opportunity}</td><td><Button variant="ghost" className="px-2 py-1" onClick={() => { const digits = digitsPhone(lead.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}>WhatsApp</Button></td><td>{lead.lastAction}</td><td>{lead.nextAction}</td></tr>)}</tbody></table></div>
+        {pagination && pagination.pages > 1 && onPageChange && (
+          <div className="mt-4 flex items-center justify-between text-sm text-slate-400">
+            <span>Page {pagination.page} of {pagination.pages} · {pagination.total} leads</span>
+            <div className="flex gap-2">
+              <Button variant="secondary" disabled={pagination.page <= 1 || loading} onClick={() => onPageChange(pagination.page - 1)}>Previous</Button>
+              <Button variant="secondary" disabled={pagination.page >= pagination.pages || loading} onClick={() => onPageChange(pagination.page + 1)}>Next</Button>
+            </div>
+          </div>
+        )}
       </Panel>
     </>
   );
@@ -881,15 +932,64 @@ function ConversationsPage({ leads, toast, loading, error, onRetry }: { leads: L
 }
 
 function OutreachPage({ leads, toast, loading, error, onRetry }: { leads: Lead[]; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
-  const drafts = leads.filter((lead) => lead.conversationState === "Draft ready" || lead.nextAction.toLowerCase().includes("pitch") || lead.nextAction.toLowerCase().includes("outreach"));
-  const rows = drafts.length ? drafts : leads;
+  const [tab, setTab] = useState("Drafts");
+  const [drafts, setDrafts] = useState<Array<{ lead: Lead; outreach: Outreach }>>([]);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [draftsError, setDraftsError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!leads.length) {
+        setDrafts([]);
+        return;
+      }
+      setDraftsLoading(true);
+      setDraftsError(null);
+      try {
+        const results = await Promise.all(
+          leads.map(async (lead) => {
+            try {
+              const items = await api.listLeadOutreach(lead.id);
+              return items.map((outreach) => ({ lead, outreach }));
+            } catch {
+              return [];
+            }
+          }),
+        );
+        if (!cancelled) setDrafts(results.flat());
+      } catch (err) {
+        if (!cancelled) setDraftsError(err instanceof Error ? err.message : "Unable to load outreach drafts");
+      } finally {
+        if (!cancelled) setDraftsLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [leads]);
+
+  const filtered = drafts.filter(({ outreach }) => {
+    const status = String(outreach.status).toUpperCase();
+    if (tab === "Drafts") return status === "DRAFT" || status === "READY";
+    if (tab === "Scheduled") return status === "QUEUED";
+    if (tab === "Sent") return status === "SENT" || status === "DELIVERED";
+    if (tab === "Replies") return Boolean(outreach.replied_at);
+    if (tab === "Follow-ups") return String(outreach.message_type).toUpperCase() === "FOLLOW_UP";
+    return true;
+  });
+  const busy = loading || draftsLoading;
+  const combinedError = error ?? draftsError;
+  const empty = !busy && !combinedError && !filtered.length;
+
   return (
     <>
-      <PageHeader title="Outreach" subtitle="Drafts, scheduled messages, sent outreach, replies, and follow-ups." />
-      {(loading || error || !rows.length) && <div className="mb-4"><StatusBanner loading={loading} error={error} empty={!loading && !error && !rows.length} emptyText="No outreach drafts yet." onRetry={onRetry} /></div>}
+      <PageHeader title="Outreach" subtitle="Review generated drafts. Sending remains disabled until you approve a message locally." />
+      {(busy || combinedError || empty) && <div className="mb-4"><StatusBanner loading={busy} error={combinedError} empty={empty} emptyText="No outreach drafts yet. Generate a pitch from a lead first." onRetry={onRetry} /></div>}
       <Panel className="p-5">
-        <div className="mb-4 flex flex-wrap gap-2">{["Drafts", "Scheduled", "Sent", "Replies", "Follow-ups"].map((item) => <button key={item} className="rounded-md border border-white/10 px-3 py-2 text-sm text-slate-400 hover:text-slate-100">{item}</button>)}</div>
-        <div className="overflow-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Lead</th><th>Channel</th><th>Message</th><th>Status</th><th>Sent</th><th>Reply</th><th>Next Follow-up</th><th></th></tr></thead><tbody>{rows.map((lead) => <tr key={lead.id} className="border-t border-white/10 text-slate-300"><td className="py-4 font-medium text-white">{lead.name}</td><td>{lead.phone ? "WhatsApp" : "Email"}</td><td>{lead.opportunity}</td><td><OpportunityBadge label={lead.conversationState === "Draft ready" ? "Draft" : lead.status} /></td><td>Not sent</td><td>{lead.status === "Replied" ? "Received" : "None"}</td><td>{lead.nextAction}</td><td><Button variant="ghost" onClick={() => toast("Sending is disabled. Open the pitch draft instead.")}>Open</Button></td></tr>)}</tbody></table></div>
+        <div className="mb-4 flex flex-wrap gap-2">{["Drafts", "Scheduled", "Sent", "Replies", "Follow-ups"].map((item) => <button key={item} onClick={() => setTab(item)} className={cn("rounded-md border px-3 py-2 text-sm", tab === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400 hover:text-slate-100")}>{item}</button>)}</div>
+        <div className="overflow-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Lead</th><th>Channel</th><th>Message</th><th>Status</th><th>Sent</th><th>Reply</th><th>Next Follow-up</th><th></th></tr></thead><tbody>{filtered.map(({ lead, outreach }) => <tr key={outreach.id ?? `${lead.id}-${outreach.created_at}`} className="border-t border-white/10 text-slate-300"><td className="py-4 font-medium text-white">{lead.name}</td><td>{outreach.channel}</td><td className="max-w-xs truncate">{outreach.subject || outreach.message}</td><td><OpportunityBadge label={String(outreach.status)} /></td><td>{outreach.sent_at ? formatDate(outreach.sent_at) : "Not sent"}</td><td>{outreach.replied_at ? "Received" : "None"}</td><td>{lead.nextAction}</td><td><Button variant="ghost" onClick={() => toast("Sending is disabled. Copy or open a local draft instead.")}>Open</Button></td></tr>)}</tbody></table></div>
       </Panel>
     </>
   );
@@ -900,7 +1000,7 @@ function PipelinePage({ leads, go, moveLead, loading, error, onRetry }: { leads:
   return (
     <>
       <PageHeader title="Pipeline" subtitle="Move prospects through the website-development sales workflow." />
-      {(loading || error) && <div className="mb-4"><StatusBanner loading={loading} error={error} onRetry={onRetry} /></div>}
+      {(loading || error || !leads.length) && <div className="mb-4"><StatusBanner loading={loading} error={error} empty={!loading && !error && !leads.length} emptyText="No leads in the pipeline yet." onRetry={onRetry} /></div>}
       <div className="flex gap-4 overflow-x-auto pb-3">{stages.map((stage) => <PipelineColumn key={stage} stage={stage} leads={leads.filter((lead) => lead.status === stage)} go={go} moveLead={moveLead} stages={stages} />)}</div>
     </>
   );

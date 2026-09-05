@@ -16,7 +16,7 @@ interface UseSalesLeadsResult {
 }
 
 export function useSalesLeads(initialParams: GetSalesLeadsParams = {}): UseSalesLeadsResult {
-  const [params, setParams] = useState<GetSalesLeadsParams>(initialParams);
+  const [params, setParamsState] = useState<GetSalesLeadsParams>(initialParams);
   const [rawSummaries, setRawSummaries] = useState<SalesLeadSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +35,8 @@ export function useSalesLeads(initialParams: GetSalesLeadsParams = {}): UseSales
         pages: response.pagination.pages,
       });
     } catch (err) {
+      setRawSummaries([]);
+      setPagination(null);
       setError(err instanceof Error ? err.message : "Failed to load leads");
     } finally {
       setLoading(false);
@@ -50,6 +52,10 @@ export function useSalesLeads(initialParams: GetSalesLeadsParams = {}): UseSales
   const refetch = useCallback(async () => {
     await fetch();
   }, [fetch]);
+
+  const setParams = useCallback((next: Partial<GetSalesLeadsParams>) => {
+    setParamsState((prev) => ({ ...prev, ...next }));
+  }, []);
 
   return { leads, rawSummaries, loading, error, pagination, refetch, setParams, params };
 }

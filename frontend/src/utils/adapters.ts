@@ -48,7 +48,7 @@ function leadStatusToContactState(status: string): ContactState {
     case "INTERESTED":
       return "Interested";
     case "FOLLOW_UP":
-      return "Qualified";
+      return "Meeting";
     case "CONVERTED":
       return "Won";
     case "NOT_INTERESTED":
