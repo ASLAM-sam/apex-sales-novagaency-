@@ -119,6 +119,7 @@ export const api = {
     if (params.has_audit !== undefined) searchParams.append("has_audit", params.has_audit.toString());
     if (params.has_pitch !== undefined) searchParams.append("has_pitch", params.has_pitch.toString());
     if (params.sort_by) searchParams.append("sort_by", params.sort_by);
+    if (params.sort_order) searchParams.append("sort_order", params.sort_order);
     if (params.page !== undefined) searchParams.append("page", params.page.toString());
     if (params.page_size !== undefined) searchParams.append("page_size", params.page_size.toString());
 
@@ -157,7 +158,13 @@ export const api = {
     outreachId: string,
     updates: { subject?: string; body?: string },
   ): Promise<Outreach> {
-    return apiClient.patch<Outreach>(`/api/v1/outreach/${outreachId}`, updates);
+    return apiClient.patch<{ data: Outreach }>(`/api/v1/outreach/${outreachId}`, updates).then((envelope) => envelope.data);
+  },
+
+  updateLeadStatus(leadId: string, leadStatus: string): Promise<{ id: string; lead_status: string }> {
+    return apiClient
+      .patch<{ data: { id: string; lead_status: string } }>(`/api/v1/leads/${leadId}`, { lead_status: leadStatus })
+      .then((envelope) => envelope.data);
   },
 };
 

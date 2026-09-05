@@ -1,8 +1,29 @@
 import { API_BASE_URL } from "../config";
 
+function friendlyHttpMessage(status: number, statusText: string): string {
+  switch (status) {
+    case 400:
+    case 422:
+      return "The request could not be processed. Check the submitted values.";
+    case 404:
+      return "The requested record was not found.";
+    case 409:
+      return "This record already exists or conflicts with existing data.";
+    case 429:
+      return "Too many requests. Please wait and try again.";
+    case 500:
+    case 502:
+    case 503:
+    case 504:
+      return "The server is unavailable. Please try again shortly.";
+    default:
+      return `Request failed (${status}${statusText ? `: ${statusText}` : ""}).`;
+  }
+}
+
 export class ApiError extends Error {
   status: number;
-  data: any;
+  data: unknown;
 
   constructor(message: string, status: number, data?: any) {
     super(message);
@@ -33,15 +54,20 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
 
     if (!response.ok) {
-      let errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
+      let errorMessage = friendlyHttpMessage(response.status, response.statusText);
 
       if (data && typeof data === "object") {
-        if (typeof data.detail === "string") {
+        if (data.error && typeof data.error === "object") {
+          if (typeof data.error.message === "string" && data.error.message.trim()) {
+            errorMessage = data.error.message;
+          }
+        } else if (typeof data.detail === "string") {
           errorMessage = data.detail;
         } else if (Array.isArray(data.detail)) {
-          // FastAPI 422 validation error
-          errorMessage = data.detail.map((err: any) => `${err.loc?.join(".") || "field"}: ${err.msg}`).join("; ");
-        } else if (data.message) {
+          errorMessage = data.detail
+            .map((err: { loc?: string[]; msg?: string }) => `${err.loc?.join(".") || "field"}: ${err.msg}`)
+            .join("; ");
+        } else if (typeof data.message === "string") {
           errorMessage = data.message;
         }
       }

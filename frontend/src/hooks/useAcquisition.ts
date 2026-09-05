@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { api } from "../services/api";
 import type { AcquisitionCandidate, AcquisitionSearchResponse, AcquisitionImportResponse } from "../types/api";
 import { acquisitionCandidateToDisplay, type AcquisitionCandidateDisplay } from "../utils/adapters";

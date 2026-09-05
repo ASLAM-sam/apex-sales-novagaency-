@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../services/api";
+import type { Lead } from "../types";
 import type { SalesLeadDetailResponse, LeadTimelineResponse, SalesActionResponse, PrepareLeadResponse, ReadinessFlags } from "../types/api";
-import { salesLeadDetailToLead, timelineEventToDisplay, type Lead, type TimelineEventDisplay } from "../utils/adapters";
+import { salesLeadDetailToLead, timelineEventToDisplay, type TimelineEventDisplay } from "../utils/adapters";
 
 interface UseLeadDetailResult {
   lead: Lead | null;
@@ -94,9 +95,9 @@ interface UseLeadActionsResult {
   loading: boolean;
   error: string | null;
   prepare: () => Promise<void>;
-  runIntelligence: () => Promise<SalesActionResponse | null>;
-  qualify: () => Promise<SalesActionResponse | null>;
-  generatePitch: (channel?: "EMAIL" | "WHATSAPP" | "MANUAL") => Promise<SalesActionResponse | null>;
+  runIntelligence: (forceRefresh?: boolean) => Promise<SalesActionResponse | null>;
+  qualify: (forceRefresh?: boolean) => Promise<SalesActionResponse | null>;
+  generatePitch: (channel?: "EMAIL" | "WHATSAPP" | "MANUAL", forceRefresh?: boolean) => Promise<SalesActionResponse | null>;
 }
 
 export function useLeadActions(leadId: string | null): UseLeadActionsResult {
@@ -120,13 +121,15 @@ export function useLeadActions(leadId: string | null): UseLeadActionsResult {
     }
   }, [leadId]);
 
-  const runAction = useCallback(async (actionType: "RUN_INTELLIGENCE" | "QUALIFY" | "GENERATE_PITCH", channel?: "EMAIL" | "WHATSAPP" | "MANUAL"): Promise<SalesActionResponse | null> => {
+  const runAction = useCallback(async (
+    actionType: "RUN_INTELLIGENCE" | "QUALIFY" | "GENERATE_PITCH",
+    options?: { channel?: "EMAIL" | "WHATSAPP" | "MANUAL"; force_refresh?: boolean },
+  ): Promise<SalesActionResponse | null> => {
     if (!leadId) return null;
     setLoading(true);
     setError(null);
     try {
-      const response = await api.triggerSalesLeadAction(leadId, actionType);
-      // After action, refresh readiness
+      const response = await api.triggerSalesLeadAction(leadId, actionType, options);
       await prepare();
       return response;
     } catch (err) {
@@ -143,8 +146,8 @@ export function useLeadActions(leadId: string | null): UseLeadActionsResult {
     loading,
     error,
     prepare,
-    runIntelligence: () => runAction("RUN_INTELLIGENCE"),
-    qualify: () => runAction("QUALIFY"),
-    generatePitch: (channel) => runAction("GENERATE_PITCH", channel),
+    runIntelligence: (forceRefresh) => runAction("RUN_INTELLIGENCE", { force_refresh: forceRefresh }),
+    qualify: (forceRefresh) => runAction("QUALIFY", { force_refresh: forceRefresh }),
+    generatePitch: (channel, forceRefresh) => runAction("GENERATE_PITCH", { channel, force_refresh: forceRefresh }),
   };
 }

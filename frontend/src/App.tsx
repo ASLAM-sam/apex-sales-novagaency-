@@ -26,12 +26,16 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, Funnel, FunnelChart, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { analytics, campaigns as initialCampaigns, conversations as initialConversations, leads as initialLeads } from "./data/mockData";
+import { useDashboard } from "./hooks/useDashboard";
+import { useLeadActions, useLeadDetail, useLeadTimeline } from "./hooks/useLeadDetail";
+import { useSalesLeads } from "./hooks/useSalesLeads";
 import { cn } from "./lib/utils";
-import { findLeads, generatePitch, sendEmail, sendWhatsApp, updateLeadStatus } from "./services/mockApi";
-import type { Campaign, ContactState, Conversation, Lead, NavItem, Page, ToastMessage } from "./types";
+import { api } from "./services/api";
+import type { ContactState, Lead, NavItem, Page, ToastMessage } from "./types";
+import type { ReadinessFlags, SalesLeadDetailResponse } from "./types/api";
+import { formatDate, salesLeadSummaryToLeadItem } from "./utils/adapters";
 
 const navPrimary: NavItem[] = [
   { page: "command", label: "Command Center", icon: LayoutDashboard },
@@ -70,20 +74,77 @@ async function copyText(value: string) {
   }
 }
 
+function contactStateToLeadStatus(status: ContactState): string {
+  switch (status) {
+    case "New":
+      return "NEW";
+    case "Researched":
+      return "RESEARCHING";
+    case "Qualified":
+      return "QUALIFIED";
+    case "Contacted":
+      return "CONTACTED";
+    case "Replied":
+      return "REPLIED";
+    case "Interested":
+      return "INTERESTED";
+    case "Meeting":
+      return "FOLLOW_UP";
+    case "Proposal":
+      return "FOLLOW_UP";
+    case "Won":
+      return "CONVERTED";
+    case "Lost":
+      return "LOST";
+    default:
+      return "NEW";
+  }
+}
+
+function pitchChannelFromType(type: string): "EMAIL" | "WHATSAPP" | "MANUAL" {
+  if (type === "Email") return "EMAIL";
+  if (type === "WhatsApp") return "WHATSAPP";
+  return "MANUAL";
+}
+
+function extractPitchText(detail: SalesLeadDetailResponse | null, actionResult?: Record<string, unknown> | null): string {
+  if (actionResult) {
+    const body = actionResult.body;
+    const subject = actionResult.subject;
+    if (typeof body === "string" && body.trim()) {
+      return typeof subject === "string" && subject.trim() ? `Subject: ${subject}\n\n${body}` : body;
+    }
+  }
+  if (!detail) return "";
+  const pitch = detail.contact_action_data?.latest_pitch;
+  if (pitch && typeof pitch === "object") {
+    const record = pitch as Record<string, unknown>;
+    const body = typeof record.body === "string" ? record.body : typeof record.message === "string" ? record.message : "";
+    const subject = typeof record.subject === "string" ? record.subject : "";
+    if (body.trim()) return subject.trim() ? `Subject: ${subject}\n\n${body}` : body;
+  }
+  const latest = detail.latest_outreach ?? detail.all_outreach[0];
+  if (latest?.message) {
+    return latest.subject ? `Subject: ${latest.subject}\n\n${latest.message}` : latest.message;
+  }
+  return "";
+}
+
+function digitsPhone(phone: string): string {
+  return phone.replace(/\D/g, "");
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("command");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const [leads, setLeads] = useState<Lead[]>(initialLeads);
-  const [searchResults, setSearchResults] = useState<Lead[]>([]);
-  const [selectedLeadId, setSelectedLeadId] = useState(initialLeads[0].id);
+  const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [globalQuery, setGlobalQuery] = useState("");
   const [pitchText, setPitchText] = useState("");
-  const [conversations] = useState<Conversation[]>(initialConversations);
-  const [campaigns] = useState<Campaign[]>(initialCampaigns);
-  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? leads[0];
+  const { leads, loading: leadsLoading, error: leadsError, refetch: refetchLeads } = useSalesLeads({ page: 1, page_size: 100, sort_by: "created_at" });
+  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) ?? leads[0] ?? null;
 
   function toast(title: string, tone: ToastMessage["tone"] = "success") {
     const id = Date.now() + Math.random();
@@ -100,9 +161,13 @@ export default function App() {
   }
 
   async function moveLead(id: string, status: ContactState) {
-    const updated = await updateLeadStatus(leads, id, status);
-    setLeads(updated);
-    toast(`Lead moved to ${status}`);
+    try {
+      await api.updateLeadStatus(id, contactStateToLeadStatus(status));
+      await refetchLeads();
+      toast(`Lead moved to ${status}`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Unable to update lead status", "error");
+    }
   }
 
   useEffect(() => {
@@ -117,15 +182,15 @@ export default function App() {
   }, []);
 
   const pageContent: Record<Page, React.ReactNode> = {
-    command: <CommandCenter leads={leads} go={go} toast={toast} />,
-    find: <FindLeads go={go} setSearchResults={setSearchResults} toast={toast} setSelectedLeadId={setSelectedLeadId} />,
-    hot: <HotLeads leads={leads.filter((lead) => lead.quality === "Hot")} go={go} toast={toast} />,
-    leads: <AllLeads leads={searchResults.length ? searchResults : leads} go={go} toast={toast} />,
-    leadDetail: <LeadDetail lead={selectedLead} go={go} toast={toast} moveLead={moveLead} />,
-    pitch: <PitchGenerator lead={selectedLead} pitchText={pitchText} setPitchText={setPitchText} toast={toast} moveLead={moveLead} />,
-    conversations: <ConversationsPage conversations={conversations} leads={leads} toast={toast} />,
-    outreach: <OutreachPage campaigns={campaigns} leads={leads} toast={toast} />,
-    pipeline: <PipelinePage leads={leads} go={go} moveLead={moveLead} />,
+    command: <CommandCenter go={go} toast={toast} />,
+    find: <FindLeads go={go} toast={toast} setSelectedLeadId={setSelectedLeadId} />,
+    hot: <HotLeads leads={leads.filter((lead) => lead.quality === "Hot")} go={go} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
+    leads: <AllLeads leads={leads} go={go} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
+    leadDetail: <LeadDetail leadId={selectedLeadId ?? selectedLead?.id ?? null} fallback={selectedLead} go={go} toast={toast} moveLead={moveLead} onChanged={refetchLeads} />,
+    pitch: <PitchGenerator leadId={selectedLeadId ?? selectedLead?.id ?? null} fallback={selectedLead} pitchText={pitchText} setPitchText={setPitchText} toast={toast} onChanged={refetchLeads} />,
+    conversations: <ConversationsPage leads={leads} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
+    outreach: <OutreachPage leads={leads} toast={toast} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
+    pipeline: <PipelinePage leads={leads} go={go} moveLead={moveLead} loading={leadsLoading} error={leadsError} onRetry={refetchLeads} />,
     analytics: <AnalyticsPage />,
     settings: <SettingsPage toast={toast} />,
   };
@@ -305,20 +370,34 @@ function OpportunityBadge({ label }: { label: string }) {
   return <span className="inline-flex rounded-md border border-cyan-300/20 bg-cyan-400/8 px-2 py-1 text-xs font-medium text-cyan-100">{label}</span>;
 }
 
-function CommandCenter({ leads, go, toast }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string) => void }) {
-  const priority = leads.filter((lead) => lead.score >= 84).slice(0, 6);
+function StatusBanner({ loading, error, empty, emptyText, onRetry }: { loading?: boolean; error?: string | null; empty?: boolean; emptyText?: string; onRetry?: () => void }) {
+  if (loading) return <Panel className="p-5 text-sm text-slate-400">Loading workspace data...</Panel>;
+  if (error) return <Panel className="p-5 text-sm text-red-200">{error}{onRetry && <Button className="ml-3" variant="secondary" onClick={onRetry}>Retry</Button>}</Panel>;
+  if (empty) return <Panel className="p-5 text-sm text-slate-400">{emptyText ?? "No records yet."}</Panel>;
+  return null;
+}
+
+function CommandCenter({ go, toast }: { go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void }) {
+  const { kpis, summary, loading, error, refetch } = useDashboard();
+  const { leads, loading: leadsLoading, error: leadsError, refetch: refetchLeads } = useSalesLeads({ page: 1, page_size: 12, sort_by: "score" });
+  const priority = leads.filter((lead) => lead.score >= 70).slice(0, 6);
+  const attention = priority.length ? priority : leads.slice(0, 6);
   return (
     <>
       <PageHeader title="Good evening. Ready to find your next client?" subtitle="Your AI sales command center" action={<Button onClick={() => go("find")}><Plus size={17} /> Find New Leads</Button>} />
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-        {[["New Leads", "127", "+18 today"], ["Hot Leads", "23", "+6 today"], ["Contacted", "64", "+12 today"], ["Replies", "18", "+4 today"], ["Interested", "7", "+2 today"], ["Meetings", "3", "2 scheduled"]].map(([label, value, trend]) => <StatCard key={label} label={label} value={value} trend={trend} />)}
-      </div>
+      {loading || error ? <StatusBanner loading={loading} error={error} onRetry={refetch} /> : (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          {kpis.map((kpi) => <StatCard key={kpi.label} label={kpi.label} value={String(kpi.value)} trend={kpi.trend} />)}
+        </div>
+      )}
       <div className="mt-6 grid gap-6 xl:grid-cols-[1.55fr_0.95fr]">
         <Panel className="p-4 sm:p-5">
           <SectionTitle icon={<Flame size={18} />} title="Leads Requiring Attention" />
-          <div className="mt-4 grid gap-3 lg:grid-cols-2">{priority.map((lead) => <LeadMiniCard key={lead.id} lead={lead} go={go} toast={toast} />)}</div>
+          {leadsLoading || leadsError || !attention.length ? <div className="mt-4"><StatusBanner loading={leadsLoading} error={leadsError} empty={!attention.length} emptyText="No leads requiring attention yet." onRetry={refetchLeads} /></div> : (
+            <div className="mt-4 grid gap-3 lg:grid-cols-2">{attention.map((lead) => <LeadMiniCard key={lead.id} lead={lead} go={go} toast={toast} />)}</div>
+          )}
         </Panel>
-        <div className="space-y-6"><AIInsights /><ActivityTimeline leads={leads.slice(0, 5)} /></div>
+        <div className="space-y-6"><AIInsights summary={summary} /><ActivityTimeline leads={leads.slice(0, 5)} /></div>
       </div>
     </>
   );
@@ -356,7 +435,7 @@ function LeadMiniCard({ lead, go, toast }: { lead: Lead; go: (page: Page, leadId
       <div className="mt-4 flex flex-wrap gap-2">
         <Button variant="secondary" onClick={() => go("leadDetail", lead.id)}>Research</Button>
         <Button variant="secondary" onClick={() => go("pitch", lead.id)}><Sparkles size={15} /> Pitch</Button>
-        <Button variant="ghost" onClick={async () => { await sendWhatsApp(); toast("WhatsApp action simulated"); }}><MessageCircle size={15} /> WhatsApp</Button>
+        <Button variant="ghost" onClick={() => { const digits = digitsPhone(lead.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}><MessageCircle size={15} /> WhatsApp</Button>
       </div>
     </article>
   );
@@ -367,25 +446,29 @@ function QuickContact({ lead, toast }: { lead: Lead; toast: (title: string) => v
     <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-slate-300">
       <Phone size={15} className="text-cyan-300" />
       <span>{lead.phone}</span>
-      <Button variant="ghost" className="px-2 py-1 text-xs" onClick={async () => { await sendWhatsApp(); toast("WhatsApp action simulated"); }}>WhatsApp</Button>
+      <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => { const digits = digitsPhone(lead.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}>WhatsApp</Button>
       <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => { void copyText(lead.phone); toast("Phone copied"); }}>Copy</Button>
-      <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => toast("Call action simulated")}>Call</Button>
+      <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => { if (lead.phone) window.open(`tel:${lead.phone}`); toast(lead.phone ? "Call started locally" : "No phone number available"); }}>Call</Button>
     </div>
   );
 }
 
-function AIInsights() {
+function AIInsights({ summary }: { summary: { high_opportunity_leads: number; new_leads: number; draft_outreach_count: number; qualified_leads: number } | null }) {
+  const hot = summary?.high_opportunity_leads ?? 0;
+  const drafts = summary?.draft_outreach_count ?? 0;
+  const qualified = summary?.qualified_leads ?? 0;
+  const fresh = summary?.new_leads ?? 0;
   return (
     <Panel className="p-5">
       <SectionTitle icon={<Sparkles size={18} />} title="AI Sales Insights" />
       <div className="mt-4 space-y-3 text-sm text-slate-300">
-        <p><span className="font-semibold text-cyan-100">12 high-quality leads</span> found today.</p>
-        <p>7 businesses have no website.</p>
-        <p>4 businesses have outdated websites.</p>
-        <p>3 businesses have strong online demand but weak conversion experiences.</p>
+        <p><span className="font-semibold text-cyan-100">{hot} high-quality leads</span> currently scored as hot.</p>
+        <p>{fresh} new leads waiting for research.</p>
+        <p>{qualified} leads already qualified.</p>
+        <p>{drafts} outreach drafts ready for review.</p>
         <div className="rounded-md border border-cyan-300/20 bg-cyan-400/8 p-3">
           <p className="text-xs uppercase tracking-[0.14em] text-cyan-200">Recommended action</p>
-          <p className="mt-1 text-slate-100">Contact the 7 businesses without websites first.</p>
+          <p className="mt-1 text-slate-100">{fresh > 0 ? "Run intelligence on new leads first." : drafts > 0 ? "Review existing outreach drafts before generating more." : "Find and import your next set of leads."}</p>
         </div>
       </div>
     </Panel>
@@ -408,7 +491,7 @@ function ActivityTimeline({ leads }: { leads: Lead[] }) {
   );
 }
 
-function FindLeads({ go, setSearchResults, toast, setSelectedLeadId }: { go: (page: Page, leadId?: string) => void; setSearchResults: (leads: Lead[]) => void; toast: (title: string) => void; setSelectedLeadId: (id: string) => void }) {
+function FindLeads({ go, toast, setSelectedLeadId }: { go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; setSelectedLeadId: (id: string) => void }) {
   const [location, setLocation] = useState("Hyderabad");
   const [industries, setIndustries] = useState<string[]>(["Dental Clinics"]);
   const [opportunities, setOpportunities] = useState<string[]>(["No website"]);
@@ -418,23 +501,39 @@ function FindLeads({ go, setSearchResults, toast, setSelectedLeadId }: { go: (pa
   const [searching, setSearching] = useState(false);
   const [doneSteps, setDoneSteps] = useState(0);
   const [results, setResults] = useState<Lead[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const steps = ["Searching business sources", "Website analysis", "Social presence", "Lead qualification", "Generating results"];
 
   async function runSearch() {
     setSearching(true);
     setResults([]);
     setDoneSteps(0);
+    setSearchError(null);
     for (let index = 0; index < steps.length; index += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 420));
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
       setDoneSteps(index + 1);
     }
-    const found = await findLeads({ location, industries, opportunities, minimumRating, minimumReviews, count });
-    const fallback = found.length ? found : initialLeads.slice(0, 12);
-    setResults(fallback);
-    setSearchResults(fallback);
-    setSelectedLeadId(fallback[0].id);
-    setSearching(false);
-    toast("Search completed");
+    try {
+      const wantsNoWebsite = opportunities.includes("No website") && !opportunities.includes("Any Opportunity");
+      const response = await api.getSalesLeads({
+        city: location && location !== "Any" ? location : undefined,
+        category: industries[0],
+        has_website: wantsNoWebsite ? false : undefined,
+        page: 1,
+        page_size: Math.min(Math.max(count, 1), 100),
+        sort_by: "created_at",
+      });
+      const found = response.leads.map(salesLeadSummaryToLeadItem);
+      setResults(found);
+      if (found[0]) setSelectedLeadId(found[0].id);
+      toast(found.length ? `Found ${found.length} workspace leads` : "No matching workspace leads");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Search failed";
+      setSearchError(message);
+      toast(message, "error");
+    } finally {
+      setSearching(false);
+    }
   }
 
   return (
@@ -472,8 +571,9 @@ function FindLeads({ go, setSearchResults, toast, setSelectedLeadId }: { go: (pa
         </Panel>
         <div className="space-y-6">
           {searching && <SearchProgress steps={steps} doneSteps={doneSteps} />}
-          {!searching && !results.length && <EmptyState action={runSearch} />}
-          {!!results.length && <SearchResults leads={results} go={go} toast={toast} />}
+          {!searching && searchError && <StatusBanner error={searchError} onRetry={runSearch} />}
+          {!searching && !searchError && !results.length && <EmptyState action={runSearch} />}
+          {!searching && !!results.length && <SearchResults leads={results} go={go} toast={toast} />}
         </div>
       </div>
     </>
@@ -564,8 +664,8 @@ function LeadCard({ lead, go, toast }: { lead: Lead; go: (page: Page, leadId?: s
       <div className="mt-4 flex flex-wrap gap-2">
         <Button variant="secondary" onClick={() => go("leadDetail", lead.id)}>Research</Button>
         <Button onClick={() => go("pitch", lead.id)}><Sparkles size={15} /> Generate Pitch</Button>
-        <Button variant="ghost" onClick={async () => { await sendWhatsApp(); toast("WhatsApp action simulated"); }}><MessageCircle size={15} /> WhatsApp</Button>
-        <Button variant="ghost" onClick={async () => { await sendEmail(); toast("Email action simulated"); }}><Mail size={15} /> Email</Button>
+        <Button variant="ghost" onClick={() => { const digits = digitsPhone(lead.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}><MessageCircle size={15} /> WhatsApp</Button>
+        <Button variant="ghost" onClick={() => { if (lead.email) window.open(`mailto:${lead.email}`); toast(lead.email ? "Email draft opened locally" : "No email available"); }}><Mail size={15} /> Email</Button>
       </div>
     </article>
   );
@@ -575,27 +675,96 @@ function InfoBlock({ label, value }: { label: string; value: string }) {
   return <div className="rounded-md border border-white/10 bg-black/12 p-3"><p className="text-xs uppercase tracking-[0.14em] text-slate-500">{label}</p><p className="mt-1 text-sm font-medium text-slate-100">{value}</p></div>;
 }
 
-function LeadDetail({ lead, go, toast, moveLead }: { lead: Lead; go: (page: Page, leadId?: string) => void; toast: (title: string) => void; moveLead: (id: string, status: ContactState) => void }) {
+function LeadDetail({ leadId, fallback, go, toast, moveLead, onChanged }: { leadId: string | null; fallback: Lead | null; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; moveLead: (id: string, status: ContactState) => void; onChanged: () => Promise<void> }) {
+  const { lead, rawDetail, loading, error, refetch } = useLeadDetail(leadId);
+  const { events, loading: timelineLoading, error: timelineError, refetch: refetchTimeline } = useLeadTimeline(leadId);
+  const actions = useLeadActions(leadId);
+  const display = lead ?? fallback;
+  const busy = actions.loading;
+  const flags: ReadinessFlags | null = actions.readinessFlags ?? rawDetail?.readiness_flags ?? null;
+  const nextAction = actions.nextAction ?? rawDetail?.next_recommended_action ?? display?.nextAction ?? "RUN_INTELLIGENCE";
+
+  useEffect(() => {
+    if (leadId) void actions.prepare();
+  }, [leadId]);
+
+  async function runRecommended() {
+    if (!leadId || busy) return;
+    try {
+      if (nextAction === "RUN_INTELLIGENCE") {
+        const result = await actions.runIntelligence();
+        if (!result) throw new Error(actions.error ?? "Intelligence failed");
+        toast(result.message);
+      } else if (nextAction === "QUALIFY") {
+        const result = await actions.qualify();
+        if (!result) throw new Error(actions.error ?? "Qualification failed");
+        toast(result.message);
+      } else if (nextAction === "GENERATE_PITCH") {
+        go("pitch", leadId);
+        return;
+      } else {
+        toast("Review the current draft before sending.");
+        return;
+      }
+      await refetch();
+      await refetchTimeline();
+      await onChanged();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Action failed", "error");
+    }
+  }
+
+  if (loading && !display) return <StatusBanner loading />;
+  if (error && !display) return <StatusBanner error={error} onRetry={refetch} />;
+  if (!display) return <StatusBanner empty emptyText="Select a lead to research." />;
+
   return (
     <>
-      <PageHeader title={lead.name} subtitle={`${lead.industry} · ${lead.location}`} action={<div className="flex gap-2"><LeadScore score={lead.score} /><Button onClick={() => go("pitch", lead.id)}><Sparkles size={16} /> Generate Pitch</Button></div>} />
+      <PageHeader title={display.name} subtitle={`${display.industry} · ${display.location}`} action={<div className="flex gap-2"><LeadScore score={display.score} /><Button onClick={() => go("pitch", display.id)} disabled={busy}><Sparkles size={16} /> Generate Pitch</Button></div>} />
+      {(error || actions.error) && <div className="mb-4"><StatusBanner error={error ?? actions.error} onRetry={refetch} /></div>}
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="space-y-6">
-          <Panel className="p-5"><SectionTitle icon={<BriefcaseBusiness size={18} />} title="Business Overview" /><p className="mt-4 text-slate-300">{lead.overview}</p></Panel>
-          <Panel className="p-5"><SectionTitle icon={<Gauge size={18} />} title="Online Presence" /><div className="mt-4 grid gap-3 sm:grid-cols-4"><Presence label="Google" value={`${lead.rating} · ${lead.reviews} reviews`} good /><Presence label="Website" value={lead.website ? "Found" : "Not found"} good={Boolean(lead.website)} /><Presence label="Instagram" value="Active" good /><Presence label="Facebook" value="Active" good /></div></Panel>
+          <Panel className="p-5"><SectionTitle icon={<BriefcaseBusiness size={18} />} title="Business Overview" /><p className="mt-4 text-slate-300">{display.overview}</p></Panel>
+          <Panel className="p-5"><SectionTitle icon={<Gauge size={18} />} title="Online Presence" /><div className="mt-4 grid gap-3 sm:grid-cols-4"><Presence label="Google" value={`${display.rating} · ${display.reviews} reviews`} good={Boolean(rawDetail?.business.verification_status)} /><Presence label="Website" value={display.website ? "Found" : "Not found"} good={Boolean(display.website)} /><Presence label="Instagram" value={display.instagram || "Not found"} good={Boolean(display.instagram)} /><Presence label="Facebook" value={rawDetail?.business.social_profiles?.facebook || "Not found"} good={Boolean(rawDetail?.business.social_profiles?.facebook)} /></div></Panel>
           <Panel className="p-5">
             <SectionTitle icon={<Flame size={18} />} title="Why They May Need A Website" />
             <div className="mt-4 rounded-lg border border-cyan-300/20 bg-cyan-400/8 p-4">
-              <OpportunityBadge label="High Opportunity" />
-              <p className="mt-3 text-sm text-slate-300">Current situation: <span className="text-white">{lead.websiteState} found.</span></p>
-              <div className="mt-4 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">{["Professional business website", "Service pages", "Team profiles", "Appointment booking", "Google Maps integration", "WhatsApp CTA", "SEO"].map((item) => <span key={item} className="inline-flex gap-2"><Check size={15} className="text-emerald-300" /> {item}</span>)}</div>
+              <OpportunityBadge label={display.quality === "Hot" ? "High Opportunity" : display.opportunity} />
+              <p className="mt-3 text-sm text-slate-300">Current situation: <span className="text-white">{display.websiteState} found.</span></p>
+              <div className="mt-4 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">{(display.reasons.length ? display.reasons : ["Professional business website", "Service pages", "Team profiles", "Appointment booking", "Google Maps integration", "WhatsApp CTA", "SEO"]).map((item) => <span key={item} className="inline-flex gap-2"><Check size={15} className="text-emerald-300" /> {item}</span>)}</div>
             </div>
           </Panel>
-          <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Competitor Comparison" /><div className="mt-4 overflow-auto"><table className="w-full min-w-[520px] text-left text-sm"><thead className="text-slate-500"><tr><th className="py-2">Business</th><th>Website</th><th>Booking</th></tr></thead><tbody>{lead.competitors.map((item) => <tr key={item.name} className="border-t border-white/10"><td className="py-3 text-slate-200">{item.name}</td><td>{item.website ? "Yes" : "No"}</td><td>{item.booking ? "Yes" : "No"}</td></tr>)}</tbody></table></div></Panel>
+          <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Competitor Comparison" /><div className="mt-4 overflow-auto"><table className="w-full min-w-[520px] text-left text-sm"><thead className="text-slate-500"><tr><th className="py-2">Business</th><th>Website</th><th>Booking</th></tr></thead><tbody>{display.competitors.length ? display.competitors.map((item) => <tr key={item.name} className="border-t border-white/10"><td className="py-3 text-slate-200">{item.name}</td><td>{item.website ? "Yes" : "No"}</td><td>{item.booking ? "Yes" : "No"}</td></tr>) : <tr className="border-t border-white/10"><td className="py-3 text-slate-400" colSpan={3}>No competitor records yet.</td></tr>}</tbody></table></div></Panel>
+          <Panel className="p-5">
+            <SectionTitle icon={<Gauge size={18} />} title="Activity Timeline" />
+            <div className="mt-4 space-y-4">
+              {timelineLoading && <p className="text-sm text-slate-400">Loading timeline...</p>}
+              {timelineError && <p className="text-sm text-red-200">{timelineError}</p>}
+              {!timelineLoading && !events.length && <p className="text-sm text-slate-400">No timeline events yet.</p>}
+              {events.map((event) => (
+                <div key={`${event.type}-${event.timestamp}`} className="grid grid-cols-[7rem_1fr] gap-3 text-sm">
+                  <span className="text-slate-500">{formatDate(event.timestamp)}</span>
+                  <div><p className="font-medium text-slate-200">{event.title}</p><p className="text-slate-500">{event.description}</p></div>
+                </div>
+              ))}
+            </div>
+          </Panel>
         </div>
         <div className="space-y-6">
-          <Panel className="p-5"><SectionTitle icon={<Phone size={18} />} title="Contact Information" /><div className="mt-4 space-y-3 text-sm text-slate-300"><ContactRow label="Phone" value={lead.phone} /><ContactRow label="Email" value={lead.email} /><ContactRow label="Website" value={lead.website ?? "Not found"} /><ContactRow label="Instagram" value={lead.instagram} /><ContactRow label="Google listing" value={lead.googleListing} /><ContactRow label="Address" value={lead.address} /></div><QuickContact lead={lead} toast={toast} /></Panel>
-          <Panel className="border-cyan-300/20 bg-cyan-400/[0.055] p-5"><SectionTitle icon={<Sparkles size={18} />} title="AI Recommendation" /><p className="mt-4 font-semibold text-white">Contact this business.</p><p className="mt-3 text-sm text-slate-300">Best pitch angle: Your existing reputation is strong, but customers currently have no dedicated website experience.</p><p className="mt-3 text-sm text-slate-300">Recommended channel: <span className="text-cyan-100">WhatsApp</span></p><p className="mt-3 text-sm text-slate-300">Lead confidence: <span className="text-cyan-100">91%</span></p><div className="mt-5 flex flex-wrap gap-2"><Button onClick={() => go("pitch", lead.id)}><Sparkles size={16} /> Generate Pitch</Button><Button variant="secondary" onClick={() => moveLead(lead.id, "Contacted")}>Move to Contacted</Button></div></Panel>
+          <Panel className="p-5"><SectionTitle icon={<Phone size={18} />} title="Contact Information" /><div className="mt-4 space-y-3 text-sm text-slate-300"><ContactRow label="Phone" value={display.phone || "Not found"} /><ContactRow label="Email" value={display.email || "Not found"} /><ContactRow label="Website" value={display.website ?? "Not found"} /><ContactRow label="Instagram" value={display.instagram || "Not found"} /><ContactRow label="Google listing" value={display.googleListing} /><ContactRow label="Address" value={display.address || "Not found"} /></div><QuickContact lead={display} toast={toast} /></Panel>
+          <Panel className="border-cyan-300/20 bg-cyan-400/[0.055] p-5">
+            <SectionTitle icon={<Sparkles size={18} />} title="AI Recommendation" />
+            <p className="mt-4 font-semibold text-white">{nextAction.replace(/_/g, " ")}</p>
+            <p className="mt-3 text-sm text-slate-300">Best pitch angle: {display.opportunity}</p>
+            <p className="mt-3 text-sm text-slate-300">Recommended channel: <span className="text-cyan-100">{rawDetail?.contact_action_data.whatsapp_available ? "WhatsApp" : rawDetail?.contact_action_data.email_available ? "Email" : "Manual"}</span></p>
+            <p className="mt-3 text-sm text-slate-300">Lead confidence: <span className="text-cyan-100">{display.score}/100</span></p>
+            {flags && <p className="mt-3 text-xs text-slate-400">Ready: research {flags.can_research ? "yes" : "no"} · qualify {flags.can_qualify ? "yes" : "no"} · pitch {flags.can_generate_pitch ? "yes" : "no"} · draft {flags.has_draft ? "yes" : "no"}</p>}
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button onClick={() => void runRecommended()} disabled={busy}>{busy ? "Working..." : nextAction === "GENERATE_PITCH" ? "Generate Pitch" : nextAction === "QUALIFY" ? "Qualify Lead" : nextAction === "RUN_INTELLIGENCE" ? "Run Intelligence" : "Review Draft"}</Button>
+              <Button variant="secondary" onClick={() => go("pitch", display.id)} disabled={busy}><Sparkles size={16} /> Open Pitch</Button>
+              <Button variant="ghost" onClick={() => moveLead(display.id, "Contacted")} disabled={busy}>Move to Contacted</Button>
+            </div>
+          </Panel>
         </div>
       </div>
     </>
@@ -610,34 +779,55 @@ function ContactRow({ label, value }: { label: string; value: string }) {
   return <div className="flex justify-between gap-3 border-b border-white/10 pb-2 last:border-0"><span className="text-slate-500">{label}</span><span className="text-right text-slate-200">{value}</span></div>;
 }
 
-function PitchGenerator({ lead, pitchText, setPitchText, toast, moveLead }: { lead: Lead; pitchText: string; setPitchText: (value: string) => void; toast: (title: string) => void; moveLead: (id: string, status: ContactState) => void }) {
+function PitchGenerator({ leadId, fallback, pitchText, setPitchText, toast, onChanged }: { leadId: string | null; fallback: Lead | null; pitchText: string; setPitchText: (value: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; onChanged: () => Promise<void> }) {
+  const { lead, rawDetail, loading, error, refetch } = useLeadDetail(leadId);
+  const actions = useLeadActions(leadId);
   const [type, setType] = useState("WhatsApp");
   const [tone, setTone] = useState("Professional");
-  const [generating, setGenerating] = useState(false);
+  const attempted = useRef(false);
+  const display = lead ?? fallback;
+  const generating = actions.loading;
+  const draftText = pitchText || extractPitchText(rawDetail);
 
   async function createPitch(regenerate = false) {
-    setGenerating(true);
-    const text = await generatePitch(lead, tone, type);
-    setPitchText(regenerate ? `${text}\n\nP.S. I can keep this simple and show a quick direction before you decide anything.` : text);
-    setGenerating(false);
-    toast(regenerate ? "Pitch regenerated" : "Pitch generated");
+    if (!leadId || generating) return;
+    const result = await actions.generatePitch(pitchChannelFromType(type), regenerate);
+    if (!result) {
+      toast(actions.error ?? "Pitch generation failed", "error");
+      return;
+    }
+    setPitchText(extractPitchText(null, result.result) || result.message);
+    await refetch();
+    await onChanged();
+    toast(regenerate ? "Pitch draft regenerated" : "Pitch draft generated");
   }
 
   useEffect(() => {
-    if (!pitchText) void createPitch();
-  }, []);
+    attempted.current = false;
+  }, [leadId]);
+
+  useEffect(() => {
+    if (!leadId || attempted.current || generating || draftText) return;
+    attempted.current = true;
+    void createPitch();
+  }, [leadId, draftText, generating]);
+
+  if (loading && !display) return <StatusBanner loading />;
+  if (error && !display) return <StatusBanner error={error} onRetry={refetch} />;
+  if (!display) return <StatusBanner empty emptyText="Select a lead before generating a pitch." />;
 
   return (
     <>
-      <PageHeader title="AI Pitch Generator" subtitle={`${lead.name} · ${lead.score}/100`} />
+      <PageHeader title="AI Pitch Generator" subtitle={`${display.name} · ${display.score}/100`} />
+      {actions.error && <div className="mb-4"><StatusBanner error={actions.error} /></div>}
       <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
         <Panel className="p-5">
           <div className="flex flex-wrap gap-2">{["WhatsApp", "Email", "Instagram DM", "Call Opener", "Follow-up"].map((item) => <button key={item} onClick={() => setType(item)} className={cn("rounded-md border px-3 py-2 text-sm", type === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
           <div className="mt-5 flex flex-wrap gap-2">{["Professional", "Friendly", "Direct", "Consultative", "Short"].map((item) => <button key={item} onClick={() => setTone(item)} className={cn("rounded-md border px-3 py-2 text-sm", tone === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
-          <textarea value={generating ? "Generating personalized pitch..." : pitchText} onChange={(event) => setPitchText(event.target.value)} className="focus-ring mt-5 min-h-[360px] w-full resize-y rounded-lg border border-white/10 bg-black/24 p-4 text-sm leading-7 text-slate-100 focus:border-cyan-300/45" />
-          <div className="mt-4 flex flex-wrap gap-2"><Button onClick={() => createPitch()} disabled={generating}><Sparkles size={16} /> Generate Pitch</Button><Button variant="secondary" onClick={() => createPitch(true)} disabled={generating}>Regenerate</Button><Button variant="secondary" onClick={() => { void copyText(pitchText); toast("Message copied"); }}><Copy size={16} /> Copy</Button><Button variant="ghost" onClick={async () => { await sendWhatsApp(); toast("WhatsApp action simulated"); await moveLead(lead.id, "Contacted"); }}><Send size={16} /> WhatsApp</Button></div>
+          <textarea value={generating ? "Generating personalized pitch..." : draftText} onChange={(event) => setPitchText(event.target.value)} className="focus-ring mt-5 min-h-[360px] w-full resize-y rounded-lg border border-white/10 bg-black/24 p-4 text-sm leading-7 text-slate-100 focus:border-cyan-300/45" />
+          <div className="mt-4 flex flex-wrap gap-2"><Button onClick={() => void createPitch()} disabled={generating}><Sparkles size={16} /> Generate Pitch</Button><Button variant="secondary" onClick={() => void createPitch(true)} disabled={generating}>Regenerate</Button><Button variant="secondary" onClick={() => { void copyText(draftText); toast("Message copied"); }}><Copy size={16} /> Copy</Button><Button variant="ghost" onClick={() => { const digits = digitsPhone(display.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}><Send size={16} /> WhatsApp</Button></div>
         </Panel>
-        <Panel className="p-5"><SectionTitle icon={<Sparkles size={18} />} title="AI Quality" /><div className="mt-5 space-y-4"><Quality label="Personalization" value={91} /><Quality label="Relevance" value={96} /><Quality label="Clarity" value={94} /><Quality label="Sales Pressure" value={20} low /></div><div className="mt-6 space-y-2 text-sm text-slate-300">{["Mentions business", "Uses real opportunity", "Personalized", "Clear CTA", "Not overly salesy"].map((item) => <p key={item} className="flex gap-2"><Check size={15} className="text-emerald-300" /> {item}</p>)}</div></Panel>
+        <Panel className="p-5"><SectionTitle icon={<Sparkles size={18} />} title="AI Quality" /><div className="mt-5 space-y-4"><Quality label="Personalization" value={display.score || 70} /><Quality label="Relevance" value={Math.min(100, (display.score || 70) + 6)} /><Quality label="Clarity" value={Math.min(100, (display.score || 70) + 4)} /><Quality label="Sales Pressure" value={20} low /></div><div className="mt-6 space-y-2 text-sm text-slate-300">{["Mentions business", "Uses real opportunity", "Personalized", "Clear CTA", "Not overly salesy"].map((item) => <p key={item} className="flex gap-2"><Check size={15} className="text-emerald-300" /> {item}</p>)}</div></Panel>
       </div>
     </>
   );
@@ -647,61 +837,70 @@ function Quality({ label, value, low }: { label: string; value: number; low?: bo
   return <div><div className="mb-2 flex justify-between text-sm"><span className="text-slate-300">{label}</span><span className={low ? "text-emerald-200" : "text-cyan-100"}>{low ? "LOW" : `${value}%`}</span></div><div className="h-2 rounded-full bg-white/[0.06]"><div className={cn("h-full rounded-full", low ? "bg-emerald-300" : "bg-cyan-300")} style={{ width: `${value}%` }} /></div></div>;
 }
 
-function HotLeads({ leads, go, toast }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string) => void }) {
-  return <LeadTable title="Hot Leads" subtitle="Businesses most likely to benefit from your services." leads={leads} go={go} toast={toast} filters={["All", "No Website", "Website Redesign", "High Value", "Recently Found"]} />;
+function HotLeads({ leads, go, toast, loading, error, onRetry }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
+  return <LeadTable title="Hot Leads" subtitle="Businesses most likely to benefit from your services." leads={leads} go={go} toast={toast} filters={["All", "No Website", "Website Redesign", "High Value", "Recently Found"]} loading={loading} error={error} onRetry={onRetry} />;
 }
 
-function AllLeads({ leads, go, toast }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string) => void }) {
-  return <LeadTable title="All Leads" subtitle="Every researched prospect in your local frontend workspace." leads={leads} go={go} toast={toast} filters={["All", "Hot", "Good", "Maybe"]} />;
+function AllLeads({ leads, go, toast, loading, error, onRetry }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
+  return <LeadTable title="All Leads" subtitle="Every researched prospect in your sales workspace." leads={leads} go={go} toast={toast} filters={["All", "Hot", "Good", "Maybe"]} loading={loading} error={error} onRetry={onRetry} />;
 }
 
-function LeadTable({ title, subtitle, leads, go, toast, filters }: { title: string; subtitle: string; leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string) => void; filters: string[] }) {
+function LeadTable({ title, subtitle, leads, go, toast, filters, loading, error, onRetry }: { title: string; subtitle: string; leads: Lead[]; go: (page: Page, leadId?: string) => void; toast: (title: string, tone?: ToastMessage["tone"]) => void; filters: string[]; loading?: boolean; error?: string | null; onRetry?: () => void }) {
   const [filter, setFilter] = useState("All");
   const filtered = leads.filter((lead) => filter === "All" || lead.quality === filter || lead.websiteState.toLowerCase().includes(filter.toLowerCase().replace("website redesign", "outdated")));
   return (
     <>
       <PageHeader title={title} subtitle={subtitle} />
+      {(loading || error || !leads.length) && <div className="mb-4"><StatusBanner loading={loading} error={error} empty={!loading && !error && !leads.length} emptyText="No leads in the workspace yet." onRetry={onRetry} /></div>}
       <Panel className="p-5">
         <div className="mb-4 flex flex-wrap gap-2">{filters.map((item) => <button key={item} onClick={() => setFilter(item)} className={cn("rounded-md border px-3 py-2 text-sm", filter === item ? "border-cyan-300/45 bg-cyan-400/12 text-cyan-100" : "border-white/10 text-slate-400")}>{item}</button>)}</div>
-        <div className="overflow-auto"><table className="w-full min-w-[880px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Business</th><th>Industry</th><th>Location</th><th>Score</th><th>Opportunity</th><th>Contact</th><th>Last Action</th><th>Next Action</th></tr></thead><tbody>{filtered.map((lead) => <tr key={lead.id} className="border-t border-white/10 text-slate-300 hover:bg-white/[0.025]"><td className="py-4"><button onClick={() => go("leadDetail", lead.id)} className="font-semibold text-white hover:text-cyan-200">{lead.name}</button></td><td>{lead.industry}</td><td>{lead.location}</td><td><LeadScore score={lead.score} /></td><td>{lead.opportunity}</td><td><Button variant="ghost" className="px-2 py-1" onClick={() => toast("WhatsApp action simulated")}>WhatsApp</Button></td><td>{lead.lastAction}</td><td>{lead.nextAction}</td></tr>)}</tbody></table></div>
+        <div className="overflow-auto"><table className="w-full min-w-[880px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Business</th><th>Industry</th><th>Location</th><th>Score</th><th>Opportunity</th><th>Contact</th><th>Last Action</th><th>Next Action</th></tr></thead><tbody>{filtered.map((lead) => <tr key={lead.id} className="border-t border-white/10 text-slate-300 hover:bg-white/[0.025]"><td className="py-4"><button onClick={() => go("leadDetail", lead.id)} className="font-semibold text-white hover:text-cyan-200">{lead.name}</button></td><td>{lead.industry}</td><td>{lead.location}</td><td><LeadScore score={lead.score} /></td><td>{lead.opportunity}</td><td><Button variant="ghost" className="px-2 py-1" onClick={() => { const digits = digitsPhone(lead.phone); if (digits) window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer"); toast(digits ? "WhatsApp opened with no message sent" : "No phone number available"); }}>WhatsApp</Button></td><td>{lead.lastAction}</td><td>{lead.nextAction}</td></tr>)}</tbody></table></div>
       </Panel>
     </>
   );
 }
 
-function ConversationsPage({ conversations, leads, toast }: { conversations: Conversation[]; leads: Lead[]; toast: (title: string) => void }) {
-  const [activeId, setActiveId] = useState(conversations[0].id);
-  const active = conversations.find((conversation) => conversation.id === activeId) ?? conversations[0];
-  const lead = leads.find((item) => item.id === active.leadId) ?? leads[0];
+function ConversationsPage({ leads, toast, loading, error, onRetry }: { leads: Lead[]; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
+  const draftLeads = leads.filter((lead) => lead.conversationState === "Draft ready" || lead.status === "Replied" || lead.status === "Contacted");
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const items = draftLeads.length ? draftLeads : leads;
+  const active = items.find((lead) => lead.id === activeId) ?? items[0] ?? null;
   return (
     <>
       <PageHeader title="Conversations" subtitle="Track replies and prepare AI-assisted responses." />
+      {(loading || error || !items.length) && <div className="mb-4"><StatusBanner loading={loading} error={error} empty={!loading && !error && !items.length} emptyText="No conversation-ready leads yet." onRetry={onRetry} /></div>}
+      {active && (
       <div className="grid min-h-[680px] gap-4 xl:grid-cols-[280px_1fr_320px]">
-        <Panel className="overflow-hidden"><div className="border-b border-white/10 p-4 font-semibold text-white">Conversations</div>{conversations.map((conversation) => { const itemLead = leads.find((item) => item.id === conversation.leadId) ?? leads[0]; return <button key={conversation.id} onClick={() => setActiveId(conversation.id)} className={cn("block w-full border-b border-white/10 p-4 text-left hover:bg-white/[0.04]", activeId === conversation.id && "bg-cyan-400/10")}><div className="flex items-center justify-between"><p className="font-medium text-white">{itemLead.name}</p><span className="rounded bg-white/[0.06] px-2 py-1 text-xs text-slate-400">{conversation.channel}</span></div><p className="mt-1 text-sm text-slate-500">{itemLead.conversationState}</p></button>; })}</Panel>
-        <Panel className="flex flex-col p-5"><div className="border-b border-white/10 pb-4"><h3 className="font-semibold text-white">{lead.name}</h3><p className="text-sm text-slate-500">{active.channel}</p></div><div className="flex-1 space-y-4 py-5">{active.messages.map((message) => <div key={`${message.from}-${message.time}`} className={cn("max-w-[78%] rounded-lg border p-3 text-sm", message.from === "You" ? "ml-auto border-cyan-300/20 bg-cyan-400/10 text-cyan-50" : "border-white/10 bg-white/[0.04] text-slate-200")}><p className="mb-1 text-xs text-slate-500">{message.from} · {message.time}</p>{message.text}</div>)}</div><div className="rounded-lg border border-cyan-300/20 bg-cyan-400/8 p-4"><p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">AI Suggested Reply</p><p className="mt-2 text-sm text-slate-200">{active.suggestedReply}</p><div className="mt-3 flex gap-2"><Button onClick={() => toast("Reply simulated")}>Send</Button><Button variant="secondary">Edit</Button></div></div></Panel>
-        <Panel className="p-5"><SectionTitle icon={<BriefcaseBusiness size={18} />} title="Lead Context" /><div className="mt-4 space-y-3 text-sm text-slate-300"><ContactRow label="Score" value={`${lead.score}/100`} /><ContactRow label="Opportunity" value={lead.websiteState} /><ContactRow label="Location" value={lead.location} /><ContactRow label="Next" value={lead.nextAction} /></div></Panel>
+        <Panel className="overflow-hidden"><div className="border-b border-white/10 p-4 font-semibold text-white">Conversations</div>{items.map((itemLead) => <button key={itemLead.id} onClick={() => setActiveId(itemLead.id)} className={cn("block w-full border-b border-white/10 p-4 text-left hover:bg-white/[0.04]", active.id === itemLead.id && "bg-cyan-400/10")}><div className="flex items-center justify-between"><p className="font-medium text-white">{itemLead.name}</p><span className="rounded bg-white/[0.06] px-2 py-1 text-xs text-slate-400">{itemLead.phone ? "WhatsApp" : "Email"}</span></div><p className="mt-1 text-sm text-slate-500">{itemLead.conversationState}</p></button>)}</Panel>
+        <Panel className="flex flex-col p-5"><div className="border-b border-white/10 pb-4"><h3 className="font-semibold text-white">{active.name}</h3><p className="text-sm text-slate-500">{active.status}</p></div><div className="flex-1 space-y-4 py-5"><div className="max-w-[78%] rounded-lg border border-white/10 bg-white/[0.04] p-3 text-sm text-slate-200"><p className="mb-1 text-xs text-slate-500">Workspace · {active.foundAt}</p>{active.lastAction}</div></div><div className="rounded-lg border border-cyan-300/20 bg-cyan-400/8 p-4"><p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200">AI Suggested Reply</p><p className="mt-2 text-sm text-slate-200">{active.nextAction}. Review the current draft before sending anything.</p><div className="mt-3 flex gap-2"><Button onClick={() => toast("Sending is disabled. Copy or open a local draft instead.")}>Send</Button><Button variant="secondary" onClick={() => toast("Edit the draft from the pitch screen.")}>Edit</Button></div></div></Panel>
+        <Panel className="p-5"><SectionTitle icon={<BriefcaseBusiness size={18} />} title="Lead Context" /><div className="mt-4 space-y-3 text-sm text-slate-300"><ContactRow label="Score" value={`${active.score}/100`} /><ContactRow label="Opportunity" value={active.websiteState} /><ContactRow label="Location" value={active.location} /><ContactRow label="Next" value={active.nextAction} /></div></Panel>
       </div>
+      )}
     </>
   );
 }
 
-function OutreachPage({ campaigns, leads, toast }: { campaigns: Campaign[]; leads: Lead[]; toast: (title: string) => void }) {
+function OutreachPage({ leads, toast, loading, error, onRetry }: { leads: Lead[]; toast: (title: string, tone?: ToastMessage["tone"]) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
+  const drafts = leads.filter((lead) => lead.conversationState === "Draft ready" || lead.nextAction.toLowerCase().includes("pitch") || lead.nextAction.toLowerCase().includes("outreach"));
+  const rows = drafts.length ? drafts : leads;
   return (
     <>
       <PageHeader title="Outreach" subtitle="Drafts, scheduled messages, sent outreach, replies, and follow-ups." />
+      {(loading || error || !rows.length) && <div className="mb-4"><StatusBanner loading={loading} error={error} empty={!loading && !error && !rows.length} emptyText="No outreach drafts yet." onRetry={onRetry} /></div>}
       <Panel className="p-5">
         <div className="mb-4 flex flex-wrap gap-2">{["Drafts", "Scheduled", "Sent", "Replies", "Follow-ups"].map((item) => <button key={item} className="rounded-md border border-white/10 px-3 py-2 text-sm text-slate-400 hover:text-slate-100">{item}</button>)}</div>
-        <div className="overflow-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Lead</th><th>Channel</th><th>Message</th><th>Status</th><th>Sent</th><th>Reply</th><th>Next Follow-up</th><th></th></tr></thead><tbody>{campaigns.map((campaign) => { const lead = leads.find((item) => item.id === campaign.leadId) ?? leads[0]; return <tr key={campaign.id} className="border-t border-white/10 text-slate-300"><td className="py-4 font-medium text-white">{lead.name}</td><td>{campaign.channel}</td><td>{campaign.message}</td><td><OpportunityBadge label={campaign.status} /></td><td>{campaign.sent}</td><td>{campaign.reply}</td><td>{campaign.nextFollowUp}</td><td><Button variant="ghost" onClick={() => toast("Outreach action simulated")}>Open</Button></td></tr>; })}</tbody></table></div>
+        <div className="overflow-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="text-xs uppercase tracking-[0.12em] text-slate-500"><tr><th className="py-3">Lead</th><th>Channel</th><th>Message</th><th>Status</th><th>Sent</th><th>Reply</th><th>Next Follow-up</th><th></th></tr></thead><tbody>{rows.map((lead) => <tr key={lead.id} className="border-t border-white/10 text-slate-300"><td className="py-4 font-medium text-white">{lead.name}</td><td>{lead.phone ? "WhatsApp" : "Email"}</td><td>{lead.opportunity}</td><td><OpportunityBadge label={lead.conversationState === "Draft ready" ? "Draft" : lead.status} /></td><td>Not sent</td><td>{lead.status === "Replied" ? "Received" : "None"}</td><td>{lead.nextAction}</td><td><Button variant="ghost" onClick={() => toast("Sending is disabled. Open the pitch draft instead.")}>Open</Button></td></tr>)}</tbody></table></div>
       </Panel>
     </>
   );
 }
 
-function PipelinePage({ leads, go, moveLead }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; moveLead: (id: string, status: ContactState) => void }) {
+function PipelinePage({ leads, go, moveLead, loading, error, onRetry }: { leads: Lead[]; go: (page: Page, leadId?: string) => void; moveLead: (id: string, status: ContactState) => void; loading?: boolean; error?: string | null; onRetry?: () => void }) {
   const stages: ContactState[] = ["New", "Researched", "Qualified", "Contacted", "Replied", "Interested", "Meeting", "Proposal", "Won"];
   return (
     <>
       <PageHeader title="Pipeline" subtitle="Move prospects through the website-development sales workflow." />
+      {(loading || error) && <div className="mb-4"><StatusBanner loading={loading} error={error} onRetry={onRetry} /></div>}
       <div className="flex gap-4 overflow-x-auto pb-3">{stages.map((stage) => <PipelineColumn key={stage} stage={stage} leads={leads.filter((lead) => lead.status === stage)} go={go} moveLead={moveLead} stages={stages} />)}</div>
     </>
   );
@@ -718,24 +917,43 @@ function PipelineColumn({ stage, leads, go, moveLead, stages }: { stage: Contact
 }
 
 function AnalyticsPage() {
+  const { summary, kpis, loading, error, refetch } = useDashboard();
+  const funnel = [
+    { stage: "New", value: summary?.new_leads ?? 0 },
+    { stage: "Qualified", value: summary?.qualified_leads ?? 0 },
+    { stage: "Contacted", value: summary?.contacted_leads ?? 0 },
+    { stage: "Replied", value: summary?.replied_leads ?? 0 },
+    { stage: "Interested", value: summary?.interested_leads ?? 0 },
+    { stage: "Won", value: summary?.converted_leads ?? 0 },
+  ];
+  const sources = [
+    { name: "Workspace", value: summary?.total_leads ?? 0 },
+    { name: "Qualified", value: summary?.qualified_leads ?? 0 },
+    { name: "Drafts", value: summary?.draft_outreach_count ?? 0 },
+    { name: "Hot", value: summary?.high_opportunity_leads ?? 0 },
+    { name: "Lost", value: summary?.lost_leads ?? 0 },
+  ];
+  const maxSource = Math.max(...sources.map((item) => item.value), 1);
   return (
     <>
       <PageHeader title="Analytics" subtitle="Understand where leads, replies, and wins are coming from." />
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-7">{analytics.kpis.map(([label, value]) => <StatCard key={label} label={label} value={value} trend="Mock" />)}</div>
+      {loading || error ? <StatusBanner loading={loading} error={error} onRetry={refetch} /> : (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">{kpis.map((kpi) => <StatCard key={kpi.label} label={kpi.label} value={String(kpi.value)} trend={kpi.trend} />)}</div>
+      )}
       <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-        <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Lead Funnel" /><div className="mt-4 h-80"><ResponsiveContainer><FunnelChart><Tooltip contentStyle={{ background: "#0d141d", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }} /><Funnel dataKey="value" data={analytics.funnel} fill="#22d3ee"><LabelList position="right" fill="#dbeafe" stroke="none" dataKey="stage" /></Funnel></FunnelChart></ResponsiveContainer></div></Panel>
-        <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Industry Performance" /><div className="mt-4 h-80"><ResponsiveContainer><BarChart data={analytics.industries}><CartesianGrid stroke="rgba(255,255,255,.07)" vertical={false} /><XAxis dataKey="name" stroke="#64748b" /><YAxis stroke="#64748b" /><Tooltip contentStyle={{ background: "#0d141d", border: "1px solid rgba(255,255,255,.1)" }} /><Bar dataKey="contacted" fill="#164e63" radius={[4, 4, 0, 0]} /><Bar dataKey="replies" fill="#22d3ee" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div></Panel>
+        <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Lead Funnel" /><div className="mt-4 h-80"><ResponsiveContainer><FunnelChart><Tooltip contentStyle={{ background: "#0d141d", border: "1px solid rgba(255,255,255,.1)", color: "#fff" }} /><Funnel dataKey="value" data={funnel} fill="#22d3ee"><LabelList position="right" fill="#dbeafe" stroke="none" dataKey="stage" /></Funnel></FunnelChart></ResponsiveContainer></div></Panel>
+        <Panel className="p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Pipeline Mix" /><div className="mt-4 h-80"><ResponsiveContainer><BarChart data={funnel}><CartesianGrid stroke="rgba(255,255,255,.07)" vertical={false} /><XAxis dataKey="stage" stroke="#64748b" /><YAxis stroke="#64748b" /><Tooltip contentStyle={{ background: "#0d141d", border: "1px solid rgba(255,255,255,.1)" }} /><Bar dataKey="value" fill="#22d3ee" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div></Panel>
       </div>
-      <Panel className="mt-6 p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Lead Sources" /><div className="mt-4 grid gap-3 md:grid-cols-5">{analytics.sources.map((source) => <div key={source.name} className="rounded-md border border-white/10 bg-white/[0.035] p-4"><p className="font-medium text-white">{source.name}</p><div className="mt-3 h-2 rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-cyan-300" style={{ width: `${source.value}%` }} /></div><p className="mt-2 text-sm text-slate-500">{source.value}%</p></div>)}</div></Panel>
+      <Panel className="mt-6 p-5"><SectionTitle icon={<BarChart3 size={18} />} title="Lead Sources" /><div className="mt-4 grid gap-3 md:grid-cols-5">{sources.map((source) => <div key={source.name} className="rounded-md border border-white/10 bg-white/[0.035] p-4"><p className="font-medium text-white">{source.name}</p><div className="mt-3 h-2 rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-cyan-300" style={{ width: `${Math.round((source.value / maxSource) * 100)}%` }} /></div><p className="mt-2 text-sm text-slate-500">{source.value}</p></div>)}</div></Panel>
     </>
   );
 }
 
-function SettingsPage({ toast }: { toast: (title: string) => void }) {
+function SettingsPage({ toast }: { toast: (title: string, tone?: ToastMessage["tone"]) => void }) {
   return (
     <>
-      <PageHeader title="Settings" subtitle="Frontend-only controls ready for later backend wiring." />
-      <div className="grid gap-6 lg:grid-cols-3"><SettingsPanel title="LLM" rows={[["Provider", "OmniRoute"], ["Status", "Connected (mock)"], ["Default model", "Select model"]]} /><SettingsPanel title="Outreach" rows={[["Default pitch tone", "Professional"], ["Default channel", "WhatsApp"], ["Maximum follow-ups", "3"], ["Require approval", "Enabled"]]} /><SettingsPanel title="Lead Preferences" rows={[["Default location", "Hyderabad"], ["Preferred industries", "Restaurants, Clinics, Real Estate"]]} /></div>
+      <PageHeader title="Settings" subtitle="Workspace preferences. Outreach sending remains disabled." />
+      <div className="grid gap-6 lg:grid-cols-3"><SettingsPanel title="LLM" rows={[["Provider", "Configured on backend"], ["Status", "Uses USER_LLM settings"], ["Default model", "Set in backend env"]]} /><SettingsPanel title="Outreach" rows={[["Default pitch tone", "Professional"], ["Default channel", "WhatsApp"], ["Maximum follow-ups", "3"], ["Require approval", "Enabled"]]} /><SettingsPanel title="Lead Preferences" rows={[["Default location", "Hyderabad"], ["Preferred industries", "Restaurants, Clinics, Real Estate"]]} /></div>
       <Button className="mt-6" onClick={() => toast("Settings saved locally")}>Save local settings</Button>
     </>
   );

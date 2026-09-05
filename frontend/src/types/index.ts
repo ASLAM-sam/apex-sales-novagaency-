@@ -24,7 +24,7 @@ export type WebsiteState =
   | "Website redesign";
 
 export type LeadQuality = "Hot" | "Good" | "Maybe";
-export type ContactState = "New" | "Researched" | "Qualified" | "Contacted" | "Replied" | "Interested" | "Meeting" | "Proposal" | "Won";
+export type ContactState = "New" | "Researched" | "Qualified" | "Contacted" | "Replied" | "Interested" | "Meeting" | "Proposal" | "Won" | "Lost";
 export type Channel = "WhatsApp" | "Email" | "Instagram";
 
 export interface Lead {

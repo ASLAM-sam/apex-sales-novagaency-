@@ -322,6 +322,34 @@ class SalesWorkspaceService:
             "verification_status": str(biz_obj.verification_status.value if hasattr(biz_obj.verification_status, "value") else biz_obj.verification_status),
         }
 
+        return SalesLeadDetailResponse(
+            lead=lead_obj,
+            business=biz_obj,
+            latest_research=self._stringify_document(latest_research),
+            latest_verification=pipeline_state["verification_status"],
+            latest_website_audit=self._stringify_document(latest_audit),
+            qualification=lead_obj.qualification,
+            latest_outreach=latest_outreach,
+            all_outreach=all_outreach,
+            conversation_metadata=self._stringify_document(conversation_meta),
+            pipeline_state=pipeline_state,
+            readiness_flags=readiness,
+            next_recommended_action=next_action,
+            contact_action_data=contact_action,
+        )
+
+    @staticmethod
+    def _stringify_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not doc:
+            return None
+        out: Dict[str, Any] = {}
+        for key, value in doc.items():
+            if isinstance(value, ObjectId):
+                out[key] = str(value)
+            else:
+                out[key] = value
+        return out
+
     async def prepare_lead(self, lead_id: str) -> Dict[str, Any]:
         detail = await self.get_lead_detail(lead_id)
         return {
@@ -439,8 +467,13 @@ class SalesWorkspaceService:
                 result=result.model_dump(mode="json"),
             )
         elif action_clean == "QUALIFY":
+            from app.qualification.schemas import LeadQualificationRequest
+
             qual_service = LeadQualificationService()
-            result = await qual_service.qualify_lead(lead_id=lead_id, force_refresh=force_refresh)
+            result = await qual_service.qualify_lead(
+                lead_id=lead_id,
+                req=LeadQualificationRequest(force_refresh=force_refresh),
+            )
             return SalesActionResponse(
                 success=True,
                 action=action_clean,

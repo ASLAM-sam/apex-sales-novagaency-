@@ -213,7 +213,7 @@ class LeadAcquisitionService:
                     contact=contact_obj,
                     lead_source=lead_src,
                     lead_status=LeadStatus.NEW,
-                    pipeline_stage=PipelineStage.DISCOVERED,
+                    pipeline_stage=PipelineStage.NEW,
                 )
                 created_lead = await self.lead_service.create_lead(lead_create_req)
                 new_lead_id = str(created_lead.id)

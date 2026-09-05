@@ -238,9 +238,3 @@ class LeadQualificationService:
             if ev.value in s:
                 return ev
         return EvidenceType.OTHER
-        self.context_builder = context_builder or LeadAIContextBuilder(
-            lead_repo=self.lead_repo, business_repo=self.business_repo
-        )
-        self.ai_gen_service = ai_gen_service or AIGenerationService()
-        self.llm_service = llm_service or LLMService(ai_generation_service=self.ai_gen_service)
-        self.agent_run_service = agent_run_service or AgentRunService()
