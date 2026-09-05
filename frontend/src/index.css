@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #070a0f;
+  color: #e5eef8;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(circle at 25% -10%, rgba(16, 185, 255, 0.11), transparent 28rem),
+    linear-gradient(180deg, #080c13 0%, #05070b 58%, #070a0f 100%);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080c13;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1f2b3a;
+  border: 2px solid #080c13;
+  border-radius: 999px;
+}
+
+::selection {
+  background: rgba(20, 184, 255, 0.35);
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scan {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.page-enter {
+  animation: panel-in 180ms ease-out;
+}
+
+.scan-line::after {
+  animation: scan 1.4s infinite linear;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.45), transparent);
+  content: "";
+  inset: 0;
+  position: absolute;
+}
+
+.focus-ring {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.focus-ring:focus-visible {
+  outline-color: #38bdf8;
+}
+
+.input {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.375rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+  height: 2.5rem;
+  width: 100%;
+  padding: 0 0.75rem;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.input:focus {
+  border-color: rgba(56, 189, 248, 0.5);
+}
