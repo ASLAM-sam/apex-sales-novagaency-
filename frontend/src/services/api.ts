@@ -33,6 +33,7 @@ export interface SearchAcquisitionParams {
     state?: string;
     country?: string;
     category?: string;
+    description?: string;
     source_name?: string;
     source_id?: string;
   }>;
@@ -79,6 +80,7 @@ export const api = {
             state: c.state,
             country: c.country,
             category: c.category,
+            description: c.description,
             source_name: c.source_name ?? "manual",
             source_id: c.source_id,
           }))

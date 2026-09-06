@@ -158,6 +158,159 @@ async def test_acquisition_import_success_and_dnc_protection():
     assert mock_lead_service.create_lead.call_count == 0
 
 
+@pytest.mark.asyncio
+async def test_acquisition_search_never_creates_leads_or_businesses():
+    """
+    Phase 15 invariant: SEARCH must not write. It only normalizes, deduplicates,
+    and checks existing businesses/leads.
+    """
+    mock_biz_repo = MagicMock()
+    mock_biz_repo.get_by_domain = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_phone = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_name = AsyncMock(return_value=None)
+
+    mock_lead_repo = MagicMock()
+    mock_lead_repo.find_by_business_id = AsyncMock(return_value=[])
+
+    mock_biz_service = MagicMock()
+    mock_lead_service = MagicMock()
+
+    service = LeadAcquisitionService(
+        business_repo=mock_biz_repo,
+        lead_repo=mock_lead_repo,
+        business_service=mock_biz_service,
+        lead_service=mock_lead_service,
+    )
+
+    req = AcquisitionSearchRequest(
+        source="manual",
+        manual_candidates=[
+            AcquisitionCandidateInput(
+                name="Fresh Corner Cafe",
+                website="https://freshcornercafe.com",
+                phone="+1 555 0100",
+                city="Austin",
+            )
+        ],
+    )
+    res = await service.search(req)
+
+    assert res.total == 1
+    assert res.candidates[0].already_exists is False
+
+    # Search must never trigger persistence side effects.
+    mock_biz_service.create_business.assert_not_called()
+    mock_lead_service.create_lead.assert_not_called()
+    mock_biz_repo.create.assert_not_called()
+    mock_lead_repo.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_acquisition_import_selected_candidate_creates_lead():
+    """
+    Phase 15 invariant: IMPORT of selected candidates creates Business + Lead
+    records through the service layer (never in the route).
+    """
+    mock_biz_repo = MagicMock()
+    mock_biz_repo.get_by_domain = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_phone = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_name = AsyncMock(return_value=None)
+
+    mock_lead_repo = MagicMock()
+    mock_lead_repo.find_by_business_id = AsyncMock(return_value=[])
+
+    created_biz = MagicMock()
+    created_biz.id = ObjectId()
+    mock_biz_service = MagicMock()
+    mock_biz_service.create_business = AsyncMock(return_value=created_biz)
+
+    created_lead = MagicMock()
+    created_lead.id = ObjectId()
+    mock_lead_service = MagicMock()
+    mock_lead_service.create_lead = AsyncMock(return_value=created_lead)
+
+    service = LeadAcquisitionService(
+        business_repo=mock_biz_repo,
+        lead_repo=mock_lead_repo,
+        business_service=mock_biz_service,
+        lead_service=mock_lead_service,
+    )
+
+    import_req = AcquisitionImportRequest(
+        candidates=[
+            AcquisitionCandidateInput(
+                name="Sunny Bakery",
+                website="https://sunnybakery.com",
+                phone="+1 555 0198",
+                email="hello@sunnybakery.com",
+                city="Denver",
+                category="Bakery",
+            )
+        ]
+    )
+
+    res = await service.import_candidates(import_req)
+
+    assert res.imported == 1
+    assert res.already_exists == 0
+    assert res.duplicates == 0
+    assert res.invalid == 0
+    assert res.failed == 0
+    assert len(res.business_ids) == 1
+    assert len(res.lead_ids) == 1
+    assert res.details[0]["status"] == "imported"
+
+    mock_biz_service.create_business.assert_awaited_once()
+    mock_lead_service.create_lead.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_acquisition_import_duplicates_handled_by_backend():
+    """
+    Phase 15 invariant: backend deduplication must catch duplicates within a
+    single import batch without creating duplicate leads.
+    """
+    mock_biz_repo = MagicMock()
+    mock_biz_repo.get_by_domain = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_phone = AsyncMock(return_value=None)
+    mock_biz_repo.get_by_normalized_name = AsyncMock(return_value=None)
+
+    mock_lead_repo = MagicMock()
+    mock_lead_repo.find_by_business_id = AsyncMock(return_value=[])
+
+    created_biz = MagicMock()
+    created_biz.id = ObjectId()
+    mock_biz_service = MagicMock()
+    mock_biz_service.create_business = AsyncMock(return_value=created_biz)
+
+    created_lead = MagicMock()
+    created_lead.id = ObjectId()
+    mock_lead_service = MagicMock()
+    mock_lead_service.create_lead = AsyncMock(return_value=created_lead)
+
+    service = LeadAcquisitionService(
+        business_repo=mock_biz_repo,
+        lead_repo=mock_lead_repo,
+        business_service=mock_biz_service,
+        lead_service=mock_lead_service,
+    )
+
+    import_req = AcquisitionImportRequest(
+        candidates=[
+            AcquisitionCandidateInput(name="Dupe Workshop", website="https://dupeworkshop.com"),
+            AcquisitionCandidateInput(name="Dupe Workshop Copy", website="http://dupeworkshop.com"),
+        ]
+    )
+
+    res = await service.import_candidates(import_req)
+
+    assert res.imported == 1
+    assert res.duplicates == 1
+    assert len(res.lead_ids) == 1
+    mock_biz_service.create_business.assert_awaited_once()
+    mock_lead_service.create_lead.assert_awaited_once()
+
+
 from app.api.routes.acquisition import get_acquisition_service
 
 

@@ -382,6 +382,72 @@ export interface AcquisitionCandidateInput {
   raw_data?: Record<string, unknown> | null;
 }
 
+/**
+ * Qualification / intelligence result payloads returned by the sales action
+ * endpoints. These mirror the backend response schemas exactly:
+ *  - `app/qualification/schemas.py::LeadQualificationResponse`
+ *  - `app/schemas/intelligence.py::LeadIntelligenceResponse`
+ */
+export interface QualificationRecommendedService {
+  service: string;
+  reason: string;
+  confidence: number;
+  evidence: string[];
+}
+
+export interface QualificationOutput {
+  qualification_score: number;
+  qualification_label: string;
+  confidence: number;
+  recommended_services: QualificationRecommendedService[];
+  reasons: string[];
+  positive_signals: string[];
+  negative_signals: string[];
+  evidence: string[];
+  risks: string[];
+  summary: string;
+}
+
+export interface LeadQualificationResult {
+  lead_id: string;
+  business_id: string;
+  business_name: string;
+  qualification: QualificationOutput;
+  run_id: string | null;
+}
+
+export interface IntelligenceVerificationResult {
+  verification_status: string;
+  business_exists_evidence: boolean;
+  website_accessible: boolean;
+  domain_matches: boolean;
+  business_name_found: boolean;
+  phone_present: boolean;
+  email_present: boolean;
+  notes: string | null;
+}
+
+export interface IntelligenceAuditResult {
+  audit_id: string | null;
+  website_exists: boolean;
+  http_status: number | null;
+  overall_score: number | null;
+  total_issues: number;
+  high_critical_issues: number;
+  top_recommendation: string | null;
+}
+
+export interface LeadIntelligenceResult {
+  lead_id: string;
+  business_id: string;
+  business_name: string;
+  processing_status: string;
+  verification: IntelligenceVerificationResult;
+  research: Record<string, unknown> | null;
+  website_audit: IntelligenceAuditResult | null;
+  run_id: string | null;
+}
+
 export interface AcquisitionImportRequest {
   candidates: AcquisitionCandidateInput[];
 }
